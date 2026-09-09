@@ -1,0 +1,395 @@
+syntax = "proto3";
+
+package unifi.core.console.v1;
+
+import "google/protobuf/timestamp.proto";
+import "google/type/latlng.proto";
+
+// Active connection stats
+message ActiveConnections {
+  // Number of current connections via UCore proxy
+  uint32 proxy_connection_count = 1;
+}
+
+// IP addresses on consoles without the gateway
+message ClientConsoleIps {
+  // Local IP address
+  string local_ip = 1;
+}
+
+// Summarized CPU stats
+message CpuStats {
+  // Current CPU load
+  double load = 1;
+
+  // CPU temperature, in celsius
+  uint32 temperature = 2;
+}
+
+// Firmware version related info 
+message FirmwareVersionInfo {
+  // Current release channel
+  ReleaseChannel release_channel = 1;
+
+  // Current firmware version
+  string current = 2;
+
+  // Update target firmware version, if available
+  optional string updatable_to = 3;
+}
+
+// IP addresses on consoles with the gateway
+message GatewayConsoleIps {
+  // Gateway IP address
+  string gateway_ip = 1;
+
+  // DNS IP address (if applicable)
+  optional string dns_ip = 2;
+
+  // WAN1 IP address (if applicable)
+  optional string wan1_ip = 3;
+
+  // WAN2 IP address (if applicable)
+  optional string wan2_ip = 4;
+}
+
+// State of the internet connection
+enum InternetConnectionState {
+  INTERNET_CONNECTION_STATE_UNSPECIFIED = 0;
+
+  // Internet connected
+  INTERNET_CONNECTION_STATE_ONLINE = 1;
+
+  // Internet not connected, console working in offline mode
+  INTERNET_CONNECTION_STATE_OFFLINE = 2;
+
+  // Internet not connected, but it's required
+  INTERNET_CONNECTION_STATE_ERROR = 3;
+}
+
+// Console ISP info
+message Isp {
+  // ISP name
+  string name = 1;
+
+  // ISP country
+  string country = 2;
+
+  // ISP city
+  string city = 3;
+}
+
+// Console LCM settings
+message LcmSettings {
+  // Whether LCM is currently enabled
+  bool enabled = 1;
+
+  // LCM brightness, in percent
+  optional uint32 brightness_percent = 2;
+
+  // LCM night mode
+  optional NightMode night_mode = 3 [deprecated = true];
+
+  // LCM color, in hexadecimal color code without hash. e.g. 0075FF
+  optional string color = 4;
+}
+
+// Console LED settings
+message LedSettings {
+  // Whether LED is currently enabled
+  bool enabled = 1;
+}
+
+// Console location data
+message Location {
+  // Coordinates
+  google.type.LatLng coords = 1;
+
+  // Radius (used for geo-location functions)
+  optional uint32 radius = 2;
+
+  // Textual representation of location
+  optional string text = 3;
+}
+
+// Console networking configuration
+message Networking {
+  // MAC address
+  string mac = 1;
+
+  // Console ISP info
+  optional Isp isp = 2;
+
+  // Public IP address
+  optional string public_ip = 3;
+
+  // Various console IP addresses
+  oneof console_ips {
+    GatewayConsoleIps gateway_console_ips = 4;
+    ClientConsoleIps client_console_ips = 5;
+  }
+
+  // Console WAN interface statuses
+  repeated WanInfo wans = 6;
+
+  optional WanInfo shadow_iface = 7;
+
+  reserved 8 to 14;
+}
+
+// Summarized network traffic stats
+message NetworkTrafficStats {
+  // Total received traffic, in bytes
+  uint64 rx_bytes = 1;
+
+  // Total transmitted traffic, in bytes
+  uint64 tx_bytes = 2;
+}
+
+// Night Mode used for LCM
+message NightMode {
+  // Start time of the night mode, represented as minute of the day
+  uint32 on_minute = 1;
+
+  // End time of the night mode, represented as minute of the day
+  uint32 off_minute = 2;
+}
+
+// Summarized RAM stats
+message RamStats {
+  // Total amount of RAM, in kilobytes
+  uint32 total_kilobytes = 1;
+
+  // Available amount of RAM, in kilobytes
+  uint32 available_kilobytes = 2;
+}
+
+message BackupRestoreInfo {
+  BackupRestoreState state = 1;
+  optional uint32 progress = 2;
+}
+
+// State of console restore
+enum BackupRestoreState {
+  BACKUP_RESTORE_STATE_UNSPECIFIED = 0;
+
+  // Backup restore is currently in progress
+  BACKUP_RESTORE_STATE_IN_PROGRESS = 1;
+
+  // Backup restore has successfully completed
+  BACKUP_RESTORE_STATE_COMPLETED = 2;
+
+  // Backup restore has been canceled
+  BACKUP_RESTORE_STATE_CANCELED = 3;
+}
+
+// Available firmware and application release channels
+enum ReleaseChannel {
+  RELEASE_CHANNEL_UNSPECIFIED = 0;
+
+  // Official release channel ("release")
+  RELEASE_CHANNEL_OFFICIAL = 1;
+
+  // Release Candidate release channel ("release-candidate")
+  RELEASE_CHANNEL_RC = 2;
+
+  // Early Access release channel ("beta")
+  RELEASE_CHANNEL_EA = 3;
+
+  // Alpha release channel ("alpha")
+  RELEASE_CHANNEL_ALPHA = 4;
+
+  // Internal release channel ("internal")
+  RELEASE_CHANNEL_INTERNAL = 5;
+}
+
+// State of the console
+enum State {
+  STATE_UNSPECIFIED = 0;
+
+  // Console is starting up
+  STATE_STARTING_UP = 1;
+
+  // Console not yet setup
+  STATE_NOT_SETUP = 2;
+
+  // Console setup in progress
+  STATE_SETUP_IN_PROGRESS = 3;
+
+  // Performing final console setup steps
+  STATE_FINISHING_SETUP = 4;
+
+  // Console is setup and running normally
+  STATE_RUNNING = 5;
+
+  // Console is restarting
+  STATE_RESTARTING = 6;
+
+  // Console is shutting down
+  STATE_SHUTTING_DOWN = 7;
+
+  // Console is resetting to factory defaults
+  STATE_RESETTING = 8;
+
+  // Console's firmware upgrade in progress
+  STATE_UPDATING = 9;
+
+  // Console is being restored from the backup
+  STATE_RESTORING_FROM_BACKUP = 10;
+}
+
+// Console Group Roles
+enum ConsoleGroupRole {
+  CONSOLE_GROUP_ROLE_UNSPECIFIED = 0;
+
+  // Console is not part of a group
+  CONSOLE_GROUP_ROLE_UNADOPTED = 1;
+
+  // Console is the primary 
+  CONSOLE_GROUP_ROLE_PRIMARY = 2; 
+
+  // Console is a shadow 
+  CONSOLE_GROUP_ROLE_SHADOW = 3;
+
+  // Console is secondary
+  CONSOLE_GROUP_ROLE_SECONDARY = 4;
+} 
+
+enum ConsoleGroupShadowState {
+  CONSOLE_GROUP_SHADOW_STATE_UNSPECIFIED = 0;  
+
+  // Primary is connected
+  CONSOLE_GROUP_SHADOW_STATE_CONNECTED = 1;
+
+  // Primary is disconnected 
+  CONSOLE_GROUP_SHADOW_STATE_DISCONNECTED = 2;
+
+  // Shadow is promoting to primary
+  CONSOLE_GROUP_SHADOW_STATE_PROMOTING = 3;
+
+  // Network has failed over, but not full console failover
+  CONSOLE_GROUP_SHADOW_STATE_NETWORK_FAILOVER = 4;
+
+  // Setting up high availability  
+  CONSOLE_GROUP_SHADOW_STATE_SETTING_UP_HIGH_AVAILABILITY = 5;
+
+  // Shadow is acting as primary
+  CONSOLE_GROUP_SHADOW_STATE_FULL_FAILOVER = 6;
+
+  // Error with the connetion to the primary console
+  CONSOLE_GROUP_SHADOW_STATE_HIGH_AVAILABILITY_ERROR = 7;
+}
+
+message ConsoleGroupUnadoptedRoleAttributes {
+  optional bool primary_detected = 1;
+}
+
+message ConsoleGroupPrimaryRoleAttributes {
+}
+
+message ConsoleGroupShadowRoleAttributes {
+  optional google.protobuf.Timestamp last_sync_time = 1;
+  optional bool primary_detected = 2 [deprecated=true];
+  optional ConsoleGroupShadowState state = 3;
+  optional uint64 promotion_complete_estimate_seconds = 4 [deprecated=true];
+  optional bool automatic_failover = 5;
+}
+
+message ConsoleGroupSecondaryRoleAttributes {
+}
+
+// Console Groups 
+message ConsoleGroup {
+  ConsoleGroupRole role = 1;
+
+  // Attributes related to the active console group role
+  oneof role_attributes {
+    ConsoleGroupUnadoptedRoleAttributes unadopted_role_attributes = 2;
+    ConsoleGroupPrimaryRoleAttributes primary_role_attributes = 3;
+    ConsoleGroupShadowRoleAttributes shadow_role_attributes = 4;
+    ConsoleGroupSecondaryRoleAttributes secondary_role_attributes = 5;
+  }
+}
+
+// Various console settings
+message Settings {
+  // Console name, supports UTF-8 characters
+  string name = 1;
+
+  // Timezone name, defaults to etc/UTC
+  string timezone = 2;
+
+  // Physical location of the console (updated by GeoIP location or manually) 
+  optional Location location = 3;
+
+  // Console's LCM settings info (if available)
+  optional LcmSettings lcm_settings = 4;
+
+  // Console's LED settings info (if available)
+  optional LedSettings led_settings = 5;
+
+  // Console's Night mode settings info (if available)
+  optional NightMode night_mode_settings = 6;
+
+  // Console's locate action is active/inactive (if available)
+  optional bool is_locating = 7;
+}
+
+// Summarized storage stats
+message StorageStats {
+  // Total storage amount, in bytes
+  uint64 total_bytes = 1;
+
+  // Used storage amount, in bytes
+  uint64 used_bytes = 2;
+}
+
+message SubnetConflict {
+  // Subnet that is currently conflicting, formatted as "192.168.1.0/24"
+  string conflict_subnet = 1;
+
+  // Proposed subnet to auto-resolve the conflict
+  string proposed_subnet = 2;
+}
+
+enum WanType {
+  WAN_TYPE_UNSPECIFIED = 0;
+
+  // WAN interface
+  WAN_TYPE_WAN = 1;
+
+  // WAN2 interface
+  WAN_TYPE_WAN2 = 2;
+
+  // Special Shadow mode interface
+  WAN_TYPE_SHADOW = 3;
+}
+
+enum WanState {
+  WAN_STATE_UNSPECIFIED = 0;
+
+  // WAN interface is disabled
+  WAN_STATE_DISABLED = 1;
+  
+  // WAN status is is enabled, but no cable is plugged in
+  WAN_STATE_ENABLED = 2;
+  
+  // WAN interface is enabled and cable is plugged in
+  WAN_STATE_PLUGGED = 3;
+}
+
+message WanInfo {
+  // Interface designation, e.g eth0
+  string interface = 1;
+
+  // Interface type, e.g. WAN, WAN2
+  WanType type = 2;
+
+  WanState state = 3;
+
+  optional uint32 port = 4;
+  optional string mac = 5;
+  optional string ipv4 = 6;
+  optional string ipv6 = 7;
+  optional string associated_interface = 8;
+}

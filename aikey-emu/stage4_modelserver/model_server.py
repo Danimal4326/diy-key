@@ -1,0 +1,140 @@
+#!/usr/bin/env python3
+"""Model-serving HTTP endpoint on :7788, matching the real ui-infer-gateway.
+
+CONFIRMED both live (a real captured `RequestAI` task over the ucp4
+WebSocket, see ../stage3_wss/ucp4_client.py's handle_action) AND from the
+real firmware's own source (ui-infer-gateway package: main.py + schemas.py
++ models/second_verifier.py, extracted into ../../extracted/deb_extracted/
+ui-infer-gateway-0.0.1.12-Linux/). The real service is a FastAPI app:
+
+  GET  /health
+  GET  /v1/models
+  GET  /v1/models/{name}
+  POST /v1/models/{name}/inference
+
+Request body (schemas.InferenceRequest): {action, params, resUrl}.
+Response body (schemas.InferenceResponse): {model, action,
+inference_time_ms, result}. If `resUrl` was set, the real gateway also
+POSTs this same body to it (see utils/callback.py: x-ident/x-type/x-sysid
+headers + mTLS cert + verify=False, identical to every other console
+callback in this codebase) -- NOT implemented here yet, since our
+ucp4_client.py already handles resUrl delivery for the WSS-dispatched
+`recognizeKeyFrames` path; this server's job is just the direct
+`RequestAI`/targetUri calls.
+
+Two models are configured in the real config.yaml: `ppe_mlabel` (helmet/
+vest/full-body PPE classifier) and `second_verifier_mlabel` (the one
+captured live -- Person/Vehicle/Animal reverification). For
+second_verifier_mlabel, the real `result` shape (models/second_verifier.py
+docstring) is:
+  {"cameraId", "eventId", "status", "scoreThresholdApplied",
+   "preProcessMs", "inferMs", "timeElapsedMs", "verificationResults": [
+     {"thumbnailMs", "trackerID", "objectType", "isValidDetection",
+      "detectedAs", "modelRunStatus", "iouScore", "detectionConfidence",
+      "detectionConfidenceList": [{"class", "score"}, ...]}, ...]}
+This stub returns that exact shape (with placeholder values -- no real
+inference happens here yet).
+"""
+import argparse
+import http.server
+import json
+import logging
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+log = logging.getLogger("model-server")
+
+
+def _second_verifier_result(params: dict) -> dict:
+    """Placeholder result in the CONFIRMED shape (see module docstring),
+    keeping every claimed ROI's detector class as-is (modelRunStatus
+    "skipped" -- no real classification happens here yet)."""
+    rows = []
+    for entry in params.get("thumbnailMeta") or []:
+        ts = entry.get("ts")
+        for roi in entry.get("roi", []):
+            object_type = str(roi.get("objectType") or "").lower()
+            rows.append({
+                "thumbnailMs": ts,
+                "trackerID": roi.get("trackerID", roi.get("trackerId", "")),
+                "objectType": object_type,
+                "isValidDetection": True,
+                "detectedAs": object_type,
+                "modelRunStatus": "skipped",
+                "iouScore": None,
+                "detectionConfidence": 0.0,
+                "detectionConfidenceList": [],
+            })
+    return {
+        "cameraId": params.get("camera", ""),
+        "eventId": params.get("event", ""),
+        "status": "success",
+        "scoreThresholdApplied": params.get("score_threshold", 0.5),
+        "preProcessMs": 0,
+        "inferMs": 0,
+        "timeElapsedMs": 0,
+        "verificationResults": rows,
+    }
+
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    server_version = "aikey-emu-modelserver/0.1"
+
+    def _json(self, code, obj):
+        body = json.dumps(obj).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", 0) or 0)
+        raw = self.rfile.read(length) if length else b""
+        try:
+            payload = json.loads(raw) if raw else {}
+        except json.JSONDecodeError:
+            payload = {"_raw": raw.decode(errors="replace")}
+
+        log.info("POST %s from %s body=%s", self.path, self.client_address,
+                  json.dumps(payload))
+
+        # Path is /v1/models/{model_name}/inference per the real gateway.
+        parts = self.path.strip("/").split("/")
+        model_name = parts[2] if len(parts) >= 4 and parts[0] == "v1" and parts[1] == "models" else "unknown"
+        action = payload.get("action", "default")
+        params = payload.get("params", {})
+
+        if model_name == "second_verifier_mlabel":
+            result = _second_verifier_result(params)
+        else:
+            result = {}
+
+        response = {
+            "model": model_name,
+            "action": action,
+            "inference_time_ms": 0.0,
+            "result": result,
+        }
+        log.info("responding %s", response)
+        self._json(200, response)
+
+    def do_GET(self):
+        log.info("GET %s from %s", self.path, self.client_address)
+        self._json(200, {"status": "ok"})
+
+    def log_message(self, fmt, *args):
+        pass
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--port", type=int, default=7788)
+    args = ap.parse_args()
+
+    server = http.server.ThreadingHTTPServer(("0.0.0.0", args.port), Handler)
+    log.info("model-server stub listening on 0.0.0.0:%d", args.port)
+    server.serve_forever()
+
+
+if __name__ == "__main__":
+    main()

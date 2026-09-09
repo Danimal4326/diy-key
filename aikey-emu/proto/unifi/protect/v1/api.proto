@@ -1,0 +1,48 @@
+syntax = "proto3";
+
+package unifi.protect.v1;
+
+import "google/protobuf/field_mask.proto";
+import "unifi/core/console/v1/types.proto";
+import "unifi/protect/v1/types.proto";
+
+service ProtectAPI {
+    rpc Cameras(CamerasRequest) returns (stream CamerasResponse);
+    rpc Detections(DetectionsRequest) returns (stream DetectionsResponse);
+    rpc DeviceStatus(DeviceStatusRequest) returns (stream DeviceStatusResponse);
+    rpc RestartDevice(RestartDeviceRequest) returns (RestartDeviceResponse);
+    rpc UpdateDevice(UpdateDeviceRequest) returns (UpdateDeviceResponse);
+    rpc UpdateSettings(UpdateSettingsRequest) returns (UpdateSettingsResponse);
+};
+
+message CamerasRequest {};
+message CamerasResponse {
+    repeated Camera cameras = 1;
+};
+
+message DetectionsRequest {}
+message DetectionsResponse {
+    uint32 classified_count = 1;
+    uint32 queued_count = 2;
+    repeated Classification classifications = 3;
+}
+
+message DeviceStatusRequest {}
+message DeviceStatusResponse {
+    unifi.core.console.v1.State state = 1;
+    ConsoleInfo console_info = 2;
+    unifi.core.console.v1.FirmwareVersionInfo firmware_version = 3;
+    unifi.core.console.v1.Settings settings = 4;
+}
+
+message RestartDeviceRequest {}
+message RestartDeviceResponse {}
+
+message UpdateDeviceRequest {}
+message UpdateDeviceResponse {}
+
+message UpdateSettingsRequest {
+    unifi.core.console.v1.Settings settings = 1;
+    google.protobuf.FieldMask mask = 2;
+}
+message UpdateSettingsResponse {}

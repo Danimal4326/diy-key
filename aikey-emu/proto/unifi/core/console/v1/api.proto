@@ -1,0 +1,120 @@
+syntax = "proto3";
+
+package unifi.core.console.v1;
+
+import "google/protobuf/field_mask.proto";
+import "google/protobuf/timestamp.proto";
+import "unifi/core/console/v1/device.proto";
+import "unifi/core/console/v1/types.proto";
+import "unifi/core/speed_test/v1/types.proto";
+
+service ConsoleAPI {
+  // Stream of some frequently changing console stats
+  rpc ConsoleStats(ConsoleStatsRequest) returns (stream ConsoleStatsResponse);
+
+  // Stream of console status data
+  rpc ConsoleStatus(ConsoleStatusRequest) returns (stream ConsoleStatusResponse);
+
+  // Stream of attached UniFi device data
+  rpc Devices(DevicesRequest) returns (stream DevicesResponse);
+
+  // Restart console
+  rpc RestartConsole(RestartConsoleRequest) returns (RestartConsoleResponse);
+
+  // Shut down console
+  rpc ShutDownConsole(ShutDownConsoleRequest) returns (ShutDownConsoleResponse);
+
+  // Reset the console to factory defaults
+  rpc ResetConsole(ResetConsoleRequest) returns (ResetConsoleResponse);
+
+  // Update the console settings
+  rpc UpdateSettings(UpdateSettingsRequest) returns (UpdateSettingsResponse);
+  
+  // Make a shadow console the primary
+  rpc PromoteShadowConsole(PromoteShadowConsoleRequest) returns (PromoteShadowConsoleResponse);
+
+  // Try to auto-resolve a detected WAN subnet conflict
+  rpc ResolveWANSubnetConflict(ResolveWANSubnetConflictRequest) returns (ResolveWANSubnetConflictResponse);
+}
+
+message ConsoleStatsRequest {}
+message ConsoleStatsResponse {
+  // CPU stats
+  optional CpuStats cpu = 1;
+
+  // RAM stats
+  RamStats ram = 2;
+
+  // WAN stats
+  optional NetworkTrafficStats wan = 3;
+
+  // Summarized internal storage stats
+  StorageStats internal_storage = 4;
+
+  // Active connection stats
+  ActiveConnections active_connections = 5;
+}
+
+message ConsoleStatusRequest {}
+message ConsoleStatusResponse {
+  // What state the console is currently in
+  State state = 1;
+
+  // Time when console was started
+  google.protobuf.Timestamp startup_time = 2;
+
+  // Whether internet connection is active
+  InternetConnectionState internet_connection = 3;
+
+  // Various console settings
+  Settings settings = 4;
+
+  // Console networking configuration
+  Networking networking = 5;
+
+  // Console's firmware version info
+  FirmwareVersionInfo firmware_version = 6;
+
+  // Result of the last speed test run (if available)
+  optional unifi.core.speed_test.v1.Result last_speed_test_result = 7;
+
+  // Console's backup restore info (if available)
+  optional BackupRestoreInfo backup_restore_info = 8;
+
+   // Console Group information 
+  optional ConsoleGroup console_group = 9;
+
+  // Currently active user session exists (web UI or mobile app)
+  bool has_active_user_session = 10;
+
+  // Currently detected subnet conflict (if conflicting)
+  optional SubnetConflict subnet_conflict = 11;
+}
+
+message DevicesRequest {
+  repeated DeviceManager filter = 1;
+}
+message DevicesResponse {
+  repeated DeviceResponseItem items = 1;
+}
+
+message RestartConsoleRequest {}
+message RestartConsoleResponse {}
+
+message ShutDownConsoleRequest {}
+message ShutDownConsoleResponse {}
+
+message ResetConsoleRequest {}
+message ResetConsoleResponse {}
+
+message UpdateSettingsRequest {
+  Settings settings = 1;
+  google.protobuf.FieldMask mask = 2;
+}
+message UpdateSettingsResponse {}
+
+message PromoteShadowConsoleRequest {}
+message PromoteShadowConsoleResponse {}
+
+message ResolveWANSubnetConflictRequest {}
+message ResolveWANSubnetConflictResponse {}

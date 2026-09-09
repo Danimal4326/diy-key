@@ -1,0 +1,173 @@
+syntax = "proto3";
+
+package unifi.core.console.v1;
+
+import "google/protobuf/field_mask.proto";
+import "google/protobuf/struct.proto";
+import "google/protobuf/timestamp.proto";
+import "unifi/core/application/v1/types.proto";
+
+// Device addition payload
+message AddDevicePayload {
+  Device device = 1;
+}
+
+// UniFi device data
+message Device {
+  // MAC address
+  string mac = 1;
+
+  // IP address
+  string ip = 2;
+
+  // User given name for the device
+  string name = 3;
+
+  // Current device state
+  DeviceState state = 4;
+
+  // Device firmware info
+  DeviceFirmwareVersionInfo firmware_version = 5;
+
+  // Time when device was started up
+  google.protobuf.Timestamp startup_time = 6;
+
+  // Device model identifier
+  string model = 7;
+
+  // Device model shortname
+  string shortname = 8;
+
+  // Whether device is adopted by some application
+  bool is_managed = 9;
+
+  // Source of the provided device info 
+  DeviceInfoSource source = 10;
+
+  // The product line this device belongs to,
+  // currently mapping to specific applications only
+  unifi.core.application.v1.ApplicationName product_line = 11;
+
+  // Device image URLs at various sizes 
+  DeviceImages images = 12;
+
+  // The direct connect domain for device (if applicable)
+  optional string direct_connect_domain = 13;
+
+  // Device specific metadata (if applicable)
+  optional google.protobuf.Struct metadata = 14;
+
+  // HomeKit related info (if applicable)
+  optional HomeKitInfo home_kit = 15;
+}
+
+// Firmware version related info 
+message DeviceFirmwareVersionInfo {
+  // Current firmware version
+  string current = 1;
+
+  // Whether an update is available
+  bool update_available = 2;
+
+  // Update target firmware version, if available
+  optional string updatable_to = 3;
+}
+
+// Device image URLs at various sizes
+message DeviceImages {
+  optional string xs = 1;
+  optional string s = 2;
+  optional string m = 3;
+  optional string l = 4;
+  optional string xl = 5;
+}
+
+// Source of the provided device info
+enum DeviceInfoSource {
+  DEVICE_INFO_SOURCE_UNSPECIFIED = 0;
+
+  // Device info provided directly by application 
+  DEVICE_INFO_SOURCE_APPLICATION = 1;
+
+  // Device info provided via discovery 
+  DEVICE_INFO_SOURCE_DISCOVERY = 2;
+
+  // Device info provided via wireless beacon 
+  DEVICE_INFO_SOURCE_WIRELESS = 3;
+}
+
+// Device's managing applications/services
+enum DeviceManager {
+  DEVICE_MANAGER_UNSPECIFIED = 0;
+  DEVICE_MANAGER_UOS = 1;
+  DEVICE_MANAGER_NETWORK = 2;
+  DEVICE_MANAGER_PROTECT = 3;
+  DEVICE_MANAGER_ACCESS = 4;
+  DEVICE_MANAGER_TALK = 5;
+  DEVICE_MANAGER_UID = 6;
+  DEVICE_MANAGER_CONNECT = 7;
+}
+
+// Wrapper item for the device response
+message DeviceResponseItem {
+  // Unique device identifier
+  string id = 1;
+
+  // Device's managing application/service
+  DeviceManager managed_by = 2;
+
+  // Type of the response item
+  DeviceResponseItemType type = 3;
+
+  // Type specific payload
+  oneof payload {
+    AddDevicePayload add_payload = 4;
+    UpdateDevicePayload update_payload = 5;
+    RemoveDevicePayload remove_payload = 6;
+  }
+}
+
+// Type of the response item
+enum DeviceResponseItemType {
+  DEVICE_RESPONSE_ITEM_TYPE_UNSPECIFIED = 0;
+  DEVICE_RESPONSE_ITEM_TYPE_ADD = 1;
+  DEVICE_RESPONSE_ITEM_TYPE_UPDATE = 2;
+  DEVICE_RESPONSE_ITEM_TYPE_REMOVE = 3;
+}
+
+// The state of the device
+enum DeviceState {
+  DEVICE_STATE_UNSPECIFIED = 0;
+
+  // Device is online
+  DEVICE_STATE_ONLINE = 1;
+
+  // Device firmware is currently updating
+  DEVICE_STATE_UPDATING = 2;
+
+  // Device is restarting 
+  DEVICE_STATE_RESTARTING = 3;
+
+  // Device is being reset to factory defaults
+  DEVICE_STATE_RESETTING = 4;
+
+  // Device is offline
+  DEVICE_STATE_OFFLINE = 5;
+
+  // Device is being adopted by the application
+  DEVICE_STATE_ADOPTING = 6;
+}
+
+// HomeKit related info
+message HomeKitInfo {
+  uint32 accessory_id = 1;
+}
+
+// Device removal payload
+message RemoveDevicePayload {}
+
+// Device update payload
+message UpdateDevicePayload {
+  Device device = 1;
+  google.protobuf.FieldMask mask = 2;
+}

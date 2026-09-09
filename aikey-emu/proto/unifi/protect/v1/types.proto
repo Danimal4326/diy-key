@@ -1,0 +1,102 @@
+syntax = "proto3";
+
+package unifi.protect.v1;
+
+import "google/protobuf/timestamp.proto";
+
+enum CameraState {
+    CAMERA_STATE_UNSPECIFIED = 0;
+
+    // Camera is currently being updated
+    CAMERA_STATE_UPDATING = 1;
+
+    // Camera is rebooting
+    CAMERA_STATE_REBOOTING = 2;
+
+    // Camera is connected and recording
+    CAMERA_STATE_RECORDING = 3;
+
+    // Camera is connected, but it's not recording
+    CAMERA_STATE_CONNECTED = 4;
+
+    // Camera is disconnected
+    CAMERA_STATE_DISCONNECTED = 5;
+}
+message Camera {
+    string id = 1;
+    string name = 2;
+    string model = 3;
+    string mac = 4;
+    string host = 5;
+    google.protobuf.Timestamp startup_time = 6;
+    CameraState state = 7;
+    string alias_name = 8;
+    string stream_name = 9;
+    CameraFirmware firmware = 10;
+    google.protobuf.Timestamp last_motion_time = 11;
+    repeated CameraChannel channels = 12;
+    bool is_wireless_uplink_enabled = 13;
+    optional CameraWifiConnectionStatus wifi_connection_status = 14;
+    optional CameraWiredConnectionStatus wired_connection_status = 15;
+}
+
+message CameraFirmware {
+    string version = 1;
+    string build_id = 2;
+    optional string updatable_to = 3;
+}
+
+message CameraChannel {
+    uint32 id = 1;
+    string name = 2;
+    bool enabled = 3;
+    uint32 width = 4;
+    uint32 height = 5;
+    CameraBitrate bitrate = 6;
+    CameraFps fps = 7;
+    string video_id = 8;
+    uint32 idr_interval = 9;
+    bool rtsp_enabled = 10;
+    optional string rtsp_alias = 11;
+}
+
+message CameraFps {
+    uint32 current = 1;
+    repeated uint32 available = 2;
+    bool auto_enabled = 3;
+}
+
+message CameraBitrate {
+    uint32 current = 1;
+    uint32 min = 2;
+    uint32 max = 3;
+    uint32 min_client_adaptive_bitrate = 4;
+    uint32 min_motion_adaptive_bitrate = 5;
+    bool auto_enabled = 6;
+}
+
+message CameraWifiConnectionStatus {
+    uint32 channel = 1;
+    uint32 frequency = 2;
+    string ssid = 3;
+    string bssid = 4;
+    uint32 phy_megabits_per_second = 5;
+    uint32 tx_megabits_per_second = 6;
+    uint32 signal_quality = 7;
+    int32 signal_strength = 8;
+}
+
+message CameraWiredConnectionStatus {
+    optional uint32 phy_megabits_per_second = 1;
+}
+
+message Classification {
+    string name = 1;
+    uint32 count = 2;
+    bool is_interest = 3;
+}
+
+message ConsoleInfo {
+    string name = 1;
+    string ip = 2;
+}
