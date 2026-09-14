@@ -9,3 +9,7 @@ fw-download/
 *.pem
 *.crt
 .env
+
+# model weights + calibration data are fetched on deploy, never committed
+*.rknn
+rknn_convert/subset/
