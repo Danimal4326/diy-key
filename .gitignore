@@ -5,3 +5,7 @@ fw_disassembly/
 fw-download/
 *.bin
 *.img
+*.key
+*.pem
+*.crt
+.env
