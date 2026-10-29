@@ -184,8 +184,11 @@ def main():
         resp_version, resp_command = response_version(data[0], data[1])
 
         uptime_s = int(time.time() - start)
+        # Read live: a simulated firmware update pins a new version in the state dir.
+        fw_version = config.effective_discovery_fw_version(
+            {"discovery_fw_version": args.fw_version}, STATE_DIR)
         resp = build_response(resp_version, resp_command, mac, ip_bytes, args.hostname,
-                              args.fw_version, args.platform, args.sysid, uptime_s,
+                              fw_version, args.platform, args.sysid, uptime_s,
                               args.device_id)
         try:
             sock.sendto(resp, addr)

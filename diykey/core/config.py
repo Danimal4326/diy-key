@@ -67,6 +67,8 @@ ENV_OVERRIDES = {
     "DIYKEY_SYSID": "sysid",
     "DIYKEY_PLATFORM": "platform",
     "DIYKEY_DISCOVERY_PLATFORM": "discovery_platform",
+    "DIYKEY_FW_VERSION": "fw_version",
+    "DIYKEY_DISCOVERY_FW_VERSION": "discovery_fw_version",
     "DIYKEY_IFACE": "iface",
     "DIYKEY_PARENT_IFACE": "parent_iface",
     "DIYKEY_NETWORK_MODE": "mode",
@@ -109,7 +111,7 @@ _REDACTIONS = [
     # Query/form credentials.
     (re.compile(r"([?&](?:password|passwd|username|user|token)=)[^&\s'\"]+", re.I),
      r"\1<redacted>"),
-    (re.compile(r"""(['"](?:password|passwd|newPassword|new_password|[\w-]*token|adoptionCode)['"]\s*:\s*['"])[^'"]+""", re.I),
+    (re.compile(r"""(['"](?:password|passwd|newPassword|new_password|passwordOld|passwordNew|[\w-]*token|adoptionCode)['"]\s*:\s*['"])[^'"]+""", re.I),
      r"\1<redacted>"),
     # "token changed (old -> new)" before the generic token-value rule.
     (re.compile(r"(\btoken changed \()[^)]*"), r"\1<redacted>"),
@@ -414,3 +416,39 @@ def clear_adopt_state(state_dir=None):
     """Un-adopt locally. Overwrite with {} rather than deleting so every stage
     sees "not adopted" instead of ENOENT and racing a stale cache."""
     atomic_write_json(adopt_state_path(state_dir), {})
+
+
+# Firmware version: the one place every stage reads it. diykey.cfg / DIYKEY_FW_VERSION is
+# the factory version; a simulated updateFirmware pins the new one in <state>/fw_version.json,
+# which wins from then on. Read live, so discovery, /api/info and ucp4 agree without a restart.
+def fw_version_path(state_dir=None):
+    return os.path.join(state_dir_path(state_dir), "fw_version.json")
+
+
+def pinned_fw_version(state_dir=None):
+    """The version a simulated update installed, or None."""
+    try:
+        with open(fw_version_path(state_dir)) as f:
+            version = json.load(f).get("version")
+        return str(version) if version else None
+    except (OSError, json.JSONDecodeError, AttributeError):
+        return None
+
+
+def pin_fw_version(state_dir, version):
+    atomic_write_json(fw_version_path(state_dir), {"version": version})
+
+
+def effective_fw_version(cfg, state_dir=None):
+    """Short version for /api/info, getInfo and ucp4 X-Version (e.g. "2.2.8")."""
+    return pinned_fw_version(state_dir) or cfg["fw_version"]
+
+
+def effective_discovery_fw_version(cfg, state_dir=None):
+    """Discovery's long firmware string, with its vX.Y.Z swapped for a pinned version."""
+    configured = cfg["discovery_fw_version"]
+    pinned = pinned_fw_version(state_dir)
+    if not pinned:
+        return configured
+    swapped, n = re.subn(r"v\d+\.\d+\.\d+", f"v{pinned}", configured, count=1)
+    return swapped if n else configured

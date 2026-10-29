@@ -1,0 +1,63 @@
+# DIY-Key backlog
+
+Open items for the macOS / Protect 7.3.70 work on the `MacOS` branch. Newest first within each
+section.
+
+## Investigate
+
+- **"Failed to get device details from Network application … 404"** (Protect `service.log`,
+  2026-10-30 01:10 UTC). Protect asks the UniFi Network application about every adopted device's
+  MAC and logs a 404 for each one Network doesn't know:
+  ```
+  Failed to get device details from Network application for aa:bb:cc:33:44:cc: 404
+  Failed to get device details from Network application for aa:bb:cc:33:44:bb: 404
+  Failed to get device details from Network application for aa:bb:cc:33:44:aa: 404
+  Failed to get device details from Network application for 80:be:af:92:83:56: 404
+  Failed to get device details from Network application for fc:ec:da:00:00:01: 404
+  Failed to get device details from Network application for fc:ec:da:00:00:02: 404
+  Failed to get device details from Network application for 02:a0:c6:ff:20:1f: 404
+  ```
+  `fc:ec:da:00:00:01` is this DIY-Key instance (main); the others are the emulated cameras
+  (`aa:bb:cc:33:44:*`, unifi-cam-proxy), the ONVIF camera, pi-port's AI Port
+  (`fc:ec:da:00:00:02`) and `02:a0:c6:ff:20:1f`. Emulated devices are not Network clients/devices
+  with these MACs, so this is probably harmless noise. To check: which call makes it (find the
+  message in `service.js`), what Protect uses the details for (uplink, PoE port, topology?), and
+  whether anything a device reports (e.g. `getInfo`, discovery) could satisfy it.
+- ~~**First search after a cold start hung in the UI**~~ (fixed: second search 0.3 s, 2026-10-29) (2026-10-29 21:09): `NL_PARSE` took ~10 s
+  while CLIP loaded. CLIP now preloads at start (22f436e); confirm the UI no longer hangs, and
+  check `http.log` for the `/api/detection-nls` duration.
+- **`X-Token` re-sent after every restart**: `used_tokens` is per process, so a fresh start sends
+  the old single-use token again. The console still accepts the connection; check whether it
+  should only be sent before adoption completes.
+- **Retroactive processing is one-shot**: Protect only starts it from `not_started`. Re-adopting
+  resets it; decide whether a documented re-adopt is enough.
+
+## Verify live
+
+- ~~Find Anything returns results: exact (`car`), vector (`night`)~~ verified 2026-10-29 (night car event found; UI slider = min similarity, applied after the SQL). Still to check: `IMAGE_SEARCH`, and whether the 0.1 tag blend holds up with many rows and daytime crops.
+- Second Stage Verification on a real `RequestAI` (`second_verifier_mlabel`) task.
+- `thumbnailTags` rows for image (retroactive) tasks, not just video tasks.
+
+## Build
+
+- `NL_PARSE` synonyms and plurals: `people` gives no tag (not in Protect's vocabulary), so the
+  search goes vector-only. Map words to vocabulary tags (`people` → `person`, `cars` → `car`), as
+  the AI Key's `ui_slm_word_linker.json` does, so they get the exact-tag path.
+- Session search: Protect also asks `NL_PARSE` for `multilingual-e5-small` (384-d,
+  `smartDetectSessionsSearch.descEmbedding`); DIY-Key answers with CLIP, which Protect ignores.
+- Face recognition in `recognizeKeyFrames` (`faceMeta`, 128-d SFace `faceEmbed`; pi-port has
+  YuNet + SFace) and LPR (`vehicleMeta`, `lprAttrs`).
+- `enhanceImage` (Legacy Camera Enhancement / face enhance) and `speechToText`.
+- Descriptions from a real model: the AI Key's VLM weights are in the 2.0.4 firmware
+  (`ui-vlm-ai-models`, `model.safetensors`); see whether its config names a public base model.
+- PPE "batched AI Key classify" path in Protect's DS (`ppe.log`): what it sends to an AI Key.
+
+## Operations
+
+- launchd agent and reboot persistence (IP alias, PostgreSQL, service), like pi-port's
+  `macos_launchd.sh` (deferred: dev instance).
+- A second instance end to end (`diykey_pg_init.sh` not yet run for real).
+- 3 macOS-only errors in `tests/test_run_all.py` (MAC lookup shells out under a mocked
+  `subprocess.run`).
+- PostgreSQL statement logging is on for debugging (`ALTER SYSTEM RESET log_statement` to undo);
+  `logs/postgres.log` is not rotated.

@@ -110,7 +110,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             "sysid": f"0x{cfg['sysid']:04x}",
             "name": cfg["hostname"],
             "model": cfg["platform"],
-            "firmwareVersion": cfg["fw_version"],
+            "firmwareVersion": config.effective_fw_version(cfg, STATE_DIR),
             "adopted": adopted,
             "isAdopted": adopted,
             "guid": cfg["guid"],
@@ -156,6 +156,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             config.clear_adopt_state(STATE_DIR)
             log.info("readopt: cleared local adopt state")
             self._json(200, {"statusCode": 200})
+        elif path in ("/api/info", "/info"):
+            # Protect 7.3 POSTs here with {"username","password"}; no real auth.
+            self._json(200, self._info_payload())
         else:
             log.warning("unhandled POST path %s -- replying 200 anyway", self.path)
             self._json(200, {"statusCode": 200})

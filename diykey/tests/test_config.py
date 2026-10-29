@@ -156,5 +156,32 @@ class TestStateFiles(unittest.TestCase):
         self.assertTrue(os.path.isdir(self.d))
 
 
+class TestFirmwarePin(unittest.TestCase):
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.d, True)
+
+    def test_pinned_is_none_when_empty(self):
+        self.assertIsNone(config.pinned_fw_version(self.d))
+
+    def test_pin_and_read(self):
+        config.pin_fw_version(self.d, "2.2.8")
+        self.assertEqual(config.pinned_fw_version(self.d), "2.2.8")
+
+    def test_effective_uses_config_before_pin(self):
+        cfg = {"fw_version": "2.2.6"}
+        self.assertEqual(config.effective_fw_version(cfg, self.d), "2.2.6")
+        config.pin_fw_version(self.d, "2.2.8")
+        self.assertEqual(config.effective_fw_version(cfg, self.d), "2.2.8")
+
+    def test_effective_discovery_swaps_version(self):
+        cfg = {"discovery_fw_version": "aikey.rk3588.v2.2.6.0.emu.260901.0000"}
+        self.assertEqual(config.effective_discovery_fw_version(cfg, self.d),
+                         "aikey.rk3588.v2.2.6.0.emu.260901.0000")
+        config.pin_fw_version(self.d, "2.2.8")
+        self.assertEqual(config.effective_discovery_fw_version(cfg, self.d),
+                         "aikey.rk3588.v2.2.8.0.emu.260901.0000")
+
+
 if __name__ == "__main__":
     unittest.main()

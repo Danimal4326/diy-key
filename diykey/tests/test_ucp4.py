@@ -8,6 +8,7 @@ import struct
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _ROOT = os.path.dirname(_HERE)
@@ -108,7 +109,7 @@ class TestHandleAction(_StateDirTest):
         self.assertTrue(reply["adopted"])
         self.assertEqual(reply["deviceId"], "00000000-0000-4000-8000-000000000001")
         self.assertEqual(reply["connectionHost"], "10.0.0.5")
-        self.assertEqual(reply["poeType"], "unknown")
+        self.assertEqual(reply["poeType"], "802.3bt")
 
     def test_get_info_adopted_is_live(self):
         reply = self._call("getInfo")
@@ -119,7 +120,28 @@ class TestHandleAction(_StateDirTest):
         self.assertFalse(self._call("getInfo")["adopted"])
 
     def test_network_status(self):
-        self.assertEqual(self._call("networkStatus"), {"ip": "10.0.0.9", "connected": True})
+        self.assertEqual(self._call("networkStatus"),
+                         {"ip": "10.0.0.9", "connected": True, "linkSpeedMbps": 1000})
+
+    def test_disk_info(self):
+        self.assertEqual(self._call("diskInfo"), {"storageSize": "256"})
+
+    def test_get_info_feature_flags(self):
+        reply = self._call("getInfo")
+        flags = reply["featureFlags"]
+        self.assertEqual(flags["supportPersonReId"], {"enabled": True, "version": "v1"})
+        self.assertEqual(flags["supportFaceRecognition"], {"enabled": True, "version": "v1"})
+        self.assertEqual(flags["aiMode"], "basic")
+
+    def test_model_mode_reported_in_get_info(self):
+        self.addCleanup(setattr, ucp4_client, "_ai_mode", "basic")
+        self._call("changeAiInferAgentSettings", {"modelMode": "deep"})
+        self.assertEqual(self._call("getInfo")["featureFlags"]["aiMode"], "deep")
+
+    def test_change_password_without_pg_socket(self):
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("DIYKEY_PG_SOCKET", None)
+            self.assertEqual(self._call("changeUserPassword", {"username": "ui", "passwordOld": "a", "passwordNew": "b"}), {})
 
     def test_task_queue_shape(self):
         reply = self._call("getTaskQueueInfo")
@@ -138,6 +160,50 @@ class TestHandleAction(_StateDirTest):
 
     def test_unknown_action_is_empty_ack(self):
         self.assertEqual(self._call("sshService"), {})
+
+
+class TestVersionFromUpdateUri(unittest.TestCase):
+    def test_version_from_path(self):
+        self.assertEqual(ucp4_client._version_from_update_uri(
+            "https://h:7443/internal/update/rk3588/AI-Key/firmware/2.2.8/FCECDA000001"),
+            "2.2.8")
+
+    def test_version_from_query(self):
+        self.assertEqual(ucp4_client._version_from_update_uri(
+            "https://h/x?version=2.2.9&mac=1"),
+            "2.2.9")
+
+    def test_empty_uri(self):
+        self.assertIsNone(ucp4_client._version_from_update_uri(""))
+
+
+class TestUpdateFirmware(_StateDirTest):
+    DEVICE = {
+        "mac_nosep": "fcecdaaabbcc",
+        "type": "UP-AI-KEY",
+        "version": "2.2.6",
+        "guid": "00000000-0000-4000-8000-000000000002",
+        "device_id": "00000000-0000-4000-8000-000000000001",
+        "ip": "10.0.0.9",
+    }
+
+    def setUp(self):
+        super().setUp()
+        self.addCleanup(setattr, ucp4_client, "_latest_fw", None)
+
+    def _call(self, action, body=None):
+        return ucp4_client.handle_action({"action": action}, body or {}, dict(self.DEVICE))
+
+    def test_update_pins_version_without_ws(self):
+        self.assertEqual(self._call("updateFirmware",
+            {"uri": "https://h/internal/update/p/AI-Key/firmware/2.2.8/MAC"}), {})
+        self.assertEqual(self._call("getInfo")["version"], "2.2.8")
+
+    def test_update_uses_latest_from_firmware_state(self):
+        self._call("firmwareState", {"latestFirmwareVersion": "2.3.0"})
+        self.assertEqual(self._call("updateFirmware",
+            {"uri": "https://h/blob.bin"}), {})
+        self.assertEqual(self._call("getInfo")["version"], "2.3.0")
 
 
 class TestAdoptStateWait(_StateDirTest):

@@ -23,10 +23,12 @@ import os
 import re
 import ssl
 import struct
+import subprocess
 import sys
 import threading
 import time
 import uuid
+from urllib.parse import parse_qsl, urlsplit
 
 import requests
 import urllib3
@@ -39,6 +41,12 @@ if _PROJECT_DIR not in sys.path:
 
 from core import config  # noqa: E402
 from system_stats import collect_system_metrics  # noqa: E402
+import clip_fetch  # noqa: E402
+import firmware  # noqa: E402
+import ram_tagger  # noqa: E402
+import nl_search  # noqa: E402
+import clip_embed  # noqa: E402
+import second_verifier  # noqa: E402
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -55,6 +63,85 @@ RECORD_FORMAT_RAW = 3
 # --state-dir (or None for the historical stage1_http/ path). Resolved in
 # main(); kept as plain paths here so importing this module has no side effects.
 STATE_DIR = None
+
+# What a real AI Key advertises in getInfo featureFlags (Protect's aiprocessor model lists
+# them); the UI enables features, e.g. person second-stage verification, from these.
+_FEATURE = {"enabled": True, "version": "v1"}
+FEATURE_FLAGS = {k: dict(_FEATURE) for k in (
+    "supportPoseEstimation", "supportPersonReId", "supportFaceEnhancement",
+    "supportRetroactiveProcessing", "supportImageSearch", "supportRecognizeAnything",
+    "supportFaceRecognition", "supportLicensePlateRecognition")}
+# Set by changeAiInferAgentSettings {modelMode}; Protect reads it back as featureFlags.aiMode.
+_ai_mode = "basic"
+# latestFirmwareVersion from the console's last firmwareState: the update target when the
+# updateFirmware uri doesn't name one.
+_latest_fw = None
+# How long a simulated firmware update "installs" before the fake reboot.
+FAKE_UPDATE_S = float(os.environ.get("DIYKEY_FAKE_UPDATE_S") or 15)
+
+
+def _fw_version(device_info):
+    """Reported firmware: the version a simulated update pinned, else the configured one."""
+    return config.pinned_fw_version(STATE_DIR) or device_info["version"]
+
+
+def _version_from_update_uri(uri):
+    """Target version out of the console's update URL, or None: service.js builds
+    /internal/update/<platform>/<product>/<firmware|software>/<version>/<mac>, or the
+    same fields as a query string (getUpdateUrl)."""
+    if not uri:
+        return None
+    try:
+        parts = urlsplit(uri)
+    except ValueError:
+        return None
+    segments = [seg for seg in parts.path.split("/") if seg]
+    if len(segments) >= 3 and segments[-3] in ("firmware", "software"):
+        return segments[-2]
+    return dict(parse_qsl(parts.query)).get("version") or None
+
+
+def _simulate_update(ws, target, body, mac_nosep):
+    """Keep a copy of the firmware (unless DIYKEY_FW_DOWNLOAD=0), pretend to flash, pin the
+    new version, then drop the connection as the reboot. The reconnect reports the pinned
+    version, which ends Protect's update. Nothing is ever installed."""
+    t0 = time.monotonic()
+    if os.environ.get("DIYKEY_FW_DOWNLOAD", "1") != "0" and body.get("uri"):
+        log.info("updateFirmware: downloading %s to %s", target, firmware.firmware_dir())
+        firmware.download(body["uri"], target, body.get("md5"), _callback_headers(mac_nosep),
+                          (CERT_PATH, KEY_PATH))
+    wait = max(0.0, FAKE_UPDATE_S - (time.monotonic() - t0))
+    log.info("updateFirmware: simulating install of %s for %.0fs", target, wait)
+    time.sleep(wait)
+    config.pin_fw_version(STATE_DIR, target)
+    log.info("updateFirmware: now on %s; simulated reboot (closing ucp4)", target)
+    try:
+        ws.close()
+    except Exception:  # noqa: BLE001 -- already closed is fine
+        pass
+
+
+def _apply_pg_password(new_password):
+    """Give the instance's PostgreSQL role the password Protect just rotated to, so its
+    first candidate works. psql quotes the value itself (:'pw'), read from stdin."""
+    sock = os.environ.get("DIYKEY_PG_SOCKET")
+    if not sock or not new_password:
+        log.info("changeUserPassword: no DIYKEY_PG_SOCKET, PostgreSQL password left as is")
+        return
+    psql = os.path.join(os.environ.get("DIYKEY_PG_BIN") or "/opt/homebrew/opt/postgresql@17/bin",
+                        "psql")
+    try:
+        r = subprocess.run([psql, "-h", sock, "-d", "postgres", "-q", "-v", "ON_ERROR_STOP=1",
+                            "-v", f"pw={new_password}"],
+                           input="ALTER ROLE \"unifi-protect\" PASSWORD :'pw';\n",
+                           capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError) as e:
+        log.warning("changeUserPassword: psql failed: %r", e)
+        return
+    if r.returncode:
+        log.warning("changeUserPassword: psql exited %d: %s", r.returncode, r.stderr.strip())
+    else:
+        log.info("changeUserPassword: applied the rotated password to PostgreSQL")
 ADOPT_STATE_FILE = os.path.join(config.DEFAULT_STATE_DIR, "adopt_state.json")
 CERT_PATH = os.path.join(config.DEFAULT_STATE_DIR, "server.crt")
 KEY_PATH = os.path.join(config.DEFAULT_STATE_DIR, "server.key")
@@ -99,6 +186,86 @@ def unpack_all_records(data: bytes):
     return records
 
 
+def _console_host(fallback_host_port):
+    """The adopted console's host: adopt_state hosts[0], else the configured fallback."""
+    try:
+        with open(ADOPT_STATE_FILE) as f:
+            hosts = json.load(f).get("hosts") or []
+        if hosts:
+            return _split_host_port(hosts[0])[0]
+    except (OSError, ValueError, TypeError):
+        pass
+    return _split_host_port(fallback_host_port)[0] if fallback_host_port else None
+
+
+def _nl_search_reply(head, body, device_info):
+    """Reply body for an nl-search request; empty fields on failure, like the AI Key."""
+    action = head.get("action")
+    body = body or {}
+    try:
+        if action == "NL_PARSE":
+            reply = nl_search.parse(body.get("querySentence") or "")
+            log.info("NL_PARSE %r (model %s) -> tags %s types %s time %s embed %d",
+                     body.get("querySentence"), body.get("model"),
+                     [t["matchedWord"] for t in reply["keyTags"]], reply["objectTypes"],
+                     reply.get("timeTag"), len(reply["txtEmbed"]))
+            return reply
+        if action == "IMAGE_SEARCH":
+            import cv2
+            import numpy as np
+            resp = requests.get(body.get("imgUri") or "", headers=_callback_headers(
+                device_info["mac_nosep"]), cert=(CERT_PATH, KEY_PATH), verify=False, timeout=30)
+            img = cv2.imdecode(np.frombuffer(resp.content, np.uint8), cv2.IMREAD_COLOR) \
+                if resp.status_code == 200 else None
+            reply = nl_search.image_search(img)
+            log.info("IMAGE_SEARCH %s -> embed %d", resp.status_code, len(reply["imgEmbed"]))
+            return reply
+    except Exception as e:  # noqa: BLE001 -- Protect waits for a reply either way
+        log.warning("nl-search %s failed: %r", action, e)
+        return {"imgEmbed": []} if action == "IMAGE_SEARCH" else {"keyTags": [], "objectTypes": []}
+    log.warning("nl-search: unhandled action %r", action)
+    return {}
+
+
+def _nl_search_loop(fallback_host_port, device_info):
+    """Hold the AI Key's second WebSocket (wss://<console>:7443/wss/nl-search/v1) open while
+    adopted, so Protect routes Find Anything here (see nl_search.py)."""
+    backoff = 5
+    while True:
+        host = _console_host(fallback_host_port) if config.is_adopted(STATE_DIR) else None
+        if not host:
+            time.sleep(10)
+            continue
+        url = f"wss://{host}:{nl_search.PORT}{nl_search.PATH}"
+        extra = {}
+        if device_info.get("bind_ip") not in (None, "", "0.0.0.0"):
+            extra["source_address"] = (device_info["bind_ip"], 0)
+        try:
+            with connect(url, subprotocols=["ucp4"],
+                         additional_headers={"x-ident": device_info["mac_nosep"]},
+                         ssl=build_ssl_context(), open_timeout=15, **extra) as ws:
+                log.info("nl-search connected to %s", url)
+                backoff = 5
+                for raw in ws:
+                    if isinstance(raw, str):
+                        continue
+                    records = unpack_all_records(raw)
+                    if len(records) < 2:
+                        continue
+                    head, body = records[0][2], records[1][2]
+                    if head.get("type") != "request" or not head.get("id"):
+                        continue
+                    reply = _nl_search_reply(head, body, device_info)
+                    ws.send(pack_message(
+                        {"id": head["id"], "type": "response", "action": head.get("action"),
+                         "timestamp": int(time.time() * 1000), "error": None, "errorCode": 0},
+                        reply))
+        except Exception as e:  # noqa: BLE001 -- reconnect on anything
+            log.warning("nl-search connection to %s ended: %r -- retrying in %ds", url, e, backoff)
+        time.sleep(backoff)
+        backoff = min(backoff * 2, 60)
+
+
 def wait_for_adopt_state(fallback_host_port, poll_interval=1.0, fallback_after=10.0):
     """Wait for stage1_http to write adopt_state.json from a fresh adopt POST.
 
@@ -133,6 +300,7 @@ def build_ssl_context():
 
 
 def handle_action(head, body, device_info):
+    global _ai_mode, _latest_fw
     action = head.get("action")
     log.info("<<< controller action=%r head=%s body=%s", action, head, body)
 
@@ -140,20 +308,46 @@ def handle_action(head, body, device_info):
         return {
             "mac": device_info["mac_nosep"],
             "type": device_info["type"],
-            "version": device_info["version"],
+            "version": _fw_version(device_info),
             # Read live so ResetToDefaults/readopt can't leave this stale.
             "adopted": config.is_adopted(STATE_DIR),
             "guid": device_info["guid"],
             "deviceId": device_info["device_id"],
             # The console's host, not ours (used to build upload URLs).
             "connectionHost": device_info.get("console_host") or device_info["ip"],
-            "poeType": "unknown",
+            "poeType": "802.3bt",  # Protect sets requiredPoeType 802.3bt for an AI Key
+            "featureFlags": {**FEATURE_FLAGS, "aiMode": _ai_mode},
         }
-    if action == "networkStatus":
-        return {"ip": device_info["ip"], "connected": True}
-    if action == "changeUserPassword":
-        log.info("changeUserPassword requested (not persisted in this emulator)")
+    if action == "firmwareState":
+        _latest_fw = (body or {}).get("latestFirmwareVersion") or _latest_fw
         return {}
+    if action == "updateFirmware":
+        target = _version_from_update_uri((body or {}).get("uri")) or _latest_fw
+        if not target:
+            log.warning("updateFirmware without a target version (uri=%r); ignoring",
+                        (body or {}).get("uri"))
+            return {}
+        if device_info.get("ws") is not None:
+            threading.Thread(target=_simulate_update,
+                             args=(device_info["ws"], target, body, device_info["mac_nosep"]),
+                             daemon=True).start()
+        else:
+            config.pin_fw_version(STATE_DIR, target)
+        return {}
+    if action == "networkStatus":
+        # Protect reads linkSpeedMbps (and ssid/rssi, wifi only).
+        return {"ip": device_info["ip"], "connected": True, "linkSpeedMbps": 1000}
+    if action == "changeUserPassword":
+        _apply_pg_password((body or {}).get("passwordNew"))
+        return {}
+    if action == "changeAiInferAgentSettings" and (body or {}).get("modelMode"):
+        _ai_mode = body["modelMode"]
+        log.info("AI mode set to %s", _ai_mode)
+        return {}
+    if action == "diskInfo":
+        # Protect parses storageSize as a numeric string into featureFlags.storageSize;
+        # 128 makes it the UP-AI-KEY-128 variant, anything else the 256 GB OrinNX256.
+        return {"storageSize": "256"}
     if action == "systemMetrics":
         # CONFIRMED schema: a flat top-level array of {name, value} numbers.
         raw = collect_system_metrics()
@@ -183,9 +377,8 @@ def handle_action(head, body, device_info):
         # Confirmed live: the console asks us to deep-analyse a clip, then we
         # POST the result (multipart field `ram`) to the console's resUrl.
         threading.Thread(
-            target=_post_recognize_result,
-            args=(device_info["console_host"], device_info["mac_nosep"], body.get("resUrl"),
-                  body.get("camera"), body.get("event")),
+            target=_handle_recognize,
+            args=(device_info["console_host"], device_info["mac_nosep"], body),
             daemon=True,
         ).start()
     elif action == "RequestAI":
@@ -212,7 +405,7 @@ def _second_verifier_result(params: dict) -> dict:
             object_type = str(roi.get("objectType") or "").lower()
             rows.append({
                 "thumbnailMs": ts,
-                "trackerID": roi.get("trackerID", roi.get("trackerId", "")),
+                "trackerID": int(roi.get("trackerID", roi.get("trackerId", -1))),  # schema: number
                 "objectType": object_type,
                 "isValidDetection": True,
                 "detectedAs": object_type,
@@ -241,6 +434,42 @@ def _callback_headers(mac_nosep):
     }
 
 
+def _verify_from_clip(params, mac_nosep):
+    """Second Stage Verification on the event's own frames: fetch reqUrl (the export around
+    the thumbnails) as MP4, grab each thumbnail time, classify each box. None when there is
+    no tagger model or the clip/frames can't be had, so the placeholder goes back instead."""
+    tagger = _get_tagger()
+    req_url = params.get("reqUrl")
+    if not tagger or not req_url or not STATE_DIR:
+        return None
+    t0 = time.monotonic()
+    moments = sorted({e.get("ts") for e in params.get("thumbnailMeta") or [] if e.get("ts")}
+                     | set(params.get("thumbnailMs") or []))
+    if not moments:
+        return None
+    start = dict(parse_qsl(urlsplit(req_url).query)).get("start")
+    start = int(start) if start and start.isdigit() else moments[0]
+    clips_dir = os.path.join(STATE_DIR, "clips")
+    clip = clip_fetch.fetch_clip(clip_fetch.mp4_url("", CONSOLE_INTERNAL_API_PORT, req_url),
+                                 _callback_headers(mac_nosep), (CERT_PATH, KEY_PATH), clips_dir,
+                                 f"{params.get('event') or 'event'}-verify")
+    if not clip:
+        return None
+    frames = clip_fetch.extract_frames(clip, start, moments)
+    clip_fetch.prune(clips_dir)
+    if not frames:
+        return None
+    try:
+        result = second_verifier.verify(tagger, frames, params)
+    except Exception as e:  # noqa: BLE001 -- fall back to the placeholder
+        log.warning("verification failed for event %s: %r", params.get("event"), e)
+        return None
+    pre_ms = int((time.monotonic() - t0) * 1000) - result["inferMs"]
+    result["preProcessMs"] = max(0, pre_ms)
+    result["timeElapsedMs"] = result["preProcessMs"] + result["inferMs"]
+    return result
+
+
 def _post_request_ai_result(mac_nosep, task_body):
     target_uri = task_body.get("targetUri", "")
     res_url = task_body.get("resUrl")
@@ -254,7 +483,7 @@ def _post_request_ai_result(mac_nosep, task_body):
         model_name = m.group(1)
 
     if model_name == "second_verifier_mlabel":
-        result = _second_verifier_result(params)
+        result = _verify_from_clip(params, mac_nosep) or _second_verifier_result(params)
     else:
         log.warning("RequestAI for unhandled model %r, sending empty result", model_name)
         result = {}
@@ -277,25 +506,141 @@ def _post_request_ai_result(mac_nosep, task_body):
         log.warning("POST %s failed: %r", res_url, e)
 
 
-def _post_recognize_result(console_host, mac_nosep, res_url, camera_id, event_id):
+_tagger = None
+_tagger_lock = threading.Lock()
+
+
+def _get_tagger():
+    """The RAM tagger for DIYKEY_RAM_MODEL, loaded once; None when unset or broken."""
+    global _tagger
+    path = os.environ.get("DIYKEY_RAM_MODEL")
+    if not path:
+        return None
+    with _tagger_lock:
+        if _tagger is None:
+            try:
+                _tagger = ram_tagger.RamTagger(path)
+            except Exception as e:  # noqa: BLE001 -- a bad model must not stop results
+                log.warning("RAM tagger for %s failed to load: %r", path, e)
+                _tagger = False
+        return _tagger or None
+
+
+def _handle_recognize(console_host, mac_nosep, body):
+    """Fetch the task's clip, tag its key-moment and thumbnail frames, and POST
+    the result. Every step is best effort: on a failure the placeholder goes back."""
+    camera_id, event_id = body.get("camera"), body.get("event")
+    result = None
+    req_url = body.get("reqUrl")
+    if body.get("ramType") in ("image", "multipleImages") and STATE_DIR:
+        # Retroactive processing (and image RAM): cropped JPEGs by imageId, no clip.
+        result = _recognize_images(console_host, mac_nosep, body)
+    elif req_url and STATE_DIR:
+        t0 = time.monotonic()
+        clips_dir = os.path.join(STATE_DIR, "clips")
+        url = clip_fetch.mp4_url(console_host, CONSOLE_INTERNAL_API_PORT, req_url)
+        clip = clip_fetch.fetch_clip(url, _callback_headers(mac_nosep), (CERT_PATH, KEY_PATH),
+                                     clips_dir, event_id)
+        if clip and body.get("start") is not None:
+            moments = sorted(set(body.get("keyMoments") or []) | set(body.get("thumbnailMs") or []))
+            frames = clip_fetch.extract_frames(clip, body["start"], moments)
+            log.info("event %s: %d/%d frames", event_id, len(frames), len(moments))
+            tagger = _get_tagger()
+            if tagger and frames:
+                try:
+                    result = ram_tagger.build_result(tagger, camera_id, event_id, frames,
+                                                     pre_ms=(time.monotonic() - t0) * 1000,
+                                                     objects=_video_objects(body, frames))
+                    log.info("event %s: %s", event_id, result["description"])
+                except Exception as e:  # noqa: BLE001
+                    log.warning("RAM tagging failed for event %s: %r", event_id, e)
+        clip_fetch.prune(clips_dir)
+    _post_recognize_result(console_host, mac_nosep, body.get("resUrl"), camera_id, event_id,
+                           result)
+
+
+def _video_objects(body, frames):
+    """Tracked objects of a video RAM task, cropped out of the frame at their thumbnail time."""
+    import cv2
+    objects = []
+    for entry in body.get("thumbnailMeta") or []:
+        ts = entry.get("ts")
+        img = cv2.imread(frames[ts]) if ts in frames else None
+        for roi in entry.get("roi") or []:
+            tracker = roi.get("trackerID", roi.get("trackerId"))
+            if img is None or tracker is None or not roi.get("coord"):
+                continue
+            objects.append({"trackerID": tracker, "keyMomentMs": ts,
+                            "img": ram_tagger.crop_box(img, roi["coord"]), "hint": roi})
+    return objects
+
+
+def _recognize_images(console_host, mac_nosep, body):
+    """RAM result for an image task: ramType "image" (reqUrl + keyMoment) or "multipleImages"
+    (images[] with their own reqUrl and timestamps). None when nothing could be tagged."""
+    tagger = _get_tagger()
+    if not tagger:
+        return None
+    t0 = time.monotonic()
+    event_id = body.get("event") or "event"
+    if body.get("ramType") == "image":
+        entries = [body]
+    else:
+        entries = list(body.get("images") or [])
+    items = [(e.get("reqUrl"), e.get("keyMoment") or body.get("keyMoment") or body.get("start"),
+              e.get("imageId"), e) for e in entries]
+    clips_dir = os.path.join(STATE_DIR, "clips")
+    frames, hints, objects = {}, {}, []
+    for n, (url, ms, image_id, entry) in enumerate(items):
+        if not url or ms is None:
+            continue
+        url = url if url.startswith("http") else \
+            f"https://{console_host}:{CONSOLE_INTERNAL_API_PORT}{url}"
+        path = os.path.join(clips_dir, f"{event_id}-images", f"{image_id or n}.jpg")
+        if clip_fetch.fetch_image(url, _callback_headers(mac_nosep), (CERT_PATH, KEY_PATH), path):
+            frames[int(ms)] = path
+            if entry.get("objectType") or entry.get("attributes"):
+                hints[int(ms)] = entry
+            tracker = entry.get("trackerId", entry.get("trackerID"))
+            if tracker is not None:
+                import cv2
+                objects.append({"trackerID": tracker, "keyMomentMs": int(ms),
+                                "img": cv2.imread(path), "hint": entry})
+    clip_fetch.prune(clips_dir)
+    log.info("event %s: %d/%d images (%s)", event_id, len(frames), len(items), body.get("ramType"))
+    if not frames:
+        return None
+    try:
+        result = ram_tagger.build_result(tagger, body.get("camera"), body.get("event"), frames,
+                                         pre_ms=(time.monotonic() - t0) * 1000, hints=hints,
+                                         objects=objects)
+    except Exception as e:  # noqa: BLE001
+        log.warning("RAM image tagging failed for event %s: %r", event_id, e)
+        return None
+    log.info("event %s: %s", event_id, result["description"])
+    return result
+
+
+def _post_recognize_result(console_host, mac_nosep, res_url, camera_id, event_id, result=None):
     """POST our RAM/recognize-anything result to resUrl.
 
     CONFIRMED from the real firmware's syswrapper.sh: this is multipart/form-data
     with the JSON under form field ``ram`` (optionally with per-tracker JPEG
-    fields), not a plain JSON POST. The inner ram shape is still a stub.
+    fields), not a plain JSON POST. `result` is a ramInferenceSchema dict from
+    ram_tagger.build_result, or None for the placeholder.
     """
     if not res_url:
         log.warning("recognizeKeyFrames task had no resUrl, nothing to post")
         return
     url = res_url if res_url.startswith("http") else \
         f"https://{console_host}:{CONSOLE_INTERNAL_API_PORT}{res_url}"
-    stub_ram_result = {
+    ram = result or {
         "cameraId": camera_id,
         "eventId": event_id,
         "status": "success",
         "keyMomentsTags": [],
     }
-    files = {"ram": ("ram.json", json.dumps(stub_ram_result), "application/json")}
+    files = {"ram": ("ram.json", json.dumps(ram), "application/json")}
     try:
         resp = requests.post(url, headers=_callback_headers(mac_nosep), files=files,
                              cert=(CERT_PATH, KEY_PATH), verify=False, timeout=15)
@@ -329,10 +674,11 @@ def run(host: str, port: int, token: str, send_token_header: bool, device_info: 
         "X-Ident": device_info["mac_nosep"],
         "X-Mode": "0",
         "X-Type": device_info["type"],
+        "X-Sysid": device_info["sysid"],
         "X-Adopted": "true" if adopted else "false",
         "X-Ip": device_info["ip"],
         "X-Device-Id": device_info["device_id"],
-        "X-Version": device_info["version"],
+        "X-Version": _fw_version(device_info),
         "X-Guid": device_info["guid"],
     }
     if send_token_header:
@@ -341,9 +687,16 @@ def run(host: str, port: int, token: str, send_token_header: bool, device_info: 
     log.info("connecting to %s with headers=%s", url, headers)
     ctx = build_ssl_context()
 
+    # Leave from the bound address too, so a second IP on a shared host is the
+    # one the console sees (websockets passes this to socket.create_connection).
+    extra = {}
+    if device_info.get("bind_ip") not in (None, "", "0.0.0.0"):
+        extra["source_address"] = (device_info["bind_ip"], 0)
+
     with connect(url, subprotocols=["ucp4"], additional_headers=headers,
-                 ssl=ctx, open_timeout=15) as ws:
+                 ssl=ctx, open_timeout=15, **extra) as ws:
         log.info("WSS CONNECTED (subprotocol=%s)", ws.subprotocol)
+        device_info["ws"] = ws  # this connection's copy; updateFirmware closes it to "reboot"
 
         stop_watch = threading.Event()
         watcher = threading.Thread(target=_watch_for_reconnect, args=(ws, token, stop_watch),
@@ -440,7 +793,16 @@ def main():
         "device_id": args.device_id,
         "guid": args.guid,
         "ip": config.advertised_ip(config.resolve_ip(args.iface, cfg, args.bind_ip)),
+        "bind_ip": args.bind_ip,
+        "sysid": f"0x{config.sysid_int(cfg):04x}",
     }
+
+    if clip_embed.enabled():
+        # Load CLIP now: the first query would otherwise wait ~10 s for it.
+        threading.Thread(target=clip_embed.text_embed, args=("warm up",), daemon=True).start()
+    if os.environ.get("DIYKEY_NL_SEARCH", "1") != "0":
+        threading.Thread(target=_nl_search_loop, args=(args.fallback_host_port, device_info),
+                         daemon=True).start()
 
     # Tokens are single-use: send X-Token only the first time a value is seen.
     used_tokens = set()
