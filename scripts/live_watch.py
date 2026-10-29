@@ -1,35 +1,67 @@
-import urllib.request, ssl, json, http.cookiejar, time, sys, os
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 hutchx86
+"""Watch an AI Key's Protect record and its journald log side by side.
+
+Hosts and credentials come from the environment; nothing is hardcoded:
+  UNVR_HOST (required), UNVR_USER (default opencode), UNVR_PASS (required)
+  AIKEY_INSTANCE (default main -> aikey-instance-main.service)
+  AIPROC_ID (optional; all aiprocessors are watched when unset)
+  ORANGEPI_LOG (override the journal command entirely)
+"""
+import http.cookiejar
+import json
+import os
+import ssl
+import sys
+import time
+import urllib.request
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import pi_ssh
+import pi_ssh  # noqa: E402
+
+UNVR_HOST = os.environ.get("UNVR_HOST")
+if not UNVR_HOST:
+    sys.exit("UNVR_HOST is unset")
+UNVR_USER = os.environ.get("UNVR_USER", "opencode")
+if not os.environ.get("UNVR_PASS"):
+    sys.exit("UNVR_PASS is unset")
+
+AIPROCESSORS_API = os.environ.get("AIPROCESSORS_API", "/proxy/protect/api/aiprocessors")
+AIPROC_ID = os.environ.get("AIPROC_ID")
+AIKEY_INSTANCE = os.environ.get("AIKEY_INSTANCE", "main")
+PI_LOG = os.environ.get(
+    "ORANGEPI_LOG", f"journalctl -u aikey-instance-{AIKEY_INSTANCE} -n 200 --no-pager")
 
 ctx = ssl.create_default_context()
 ctx.check_hostname = False
 ctx.verify_mode = ssl.CERT_NONE
 cj = http.cookiejar.CookieJar()
 opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cj),
-                                      urllib.request.HTTPSHandler(context=ctx))
-body = json.dumps({"username": "Token", "password": "REDACTED"}).encode()
-req = urllib.request.Request("https://192.0.2.5/api/auth/login", data=body, method="POST",
-                              headers={"Content-Type": "application/json"})
+                                     urllib.request.HTTPSHandler(context=ctx))
+body = json.dumps({"username": UNVR_USER, "password": os.environ["UNVR_PASS"]}).encode()
+req = urllib.request.Request(f"https://{UNVR_HOST}/api/auth/login", data=body, method="POST",
+                             headers={"Content-Type": "application/json"})
 resp = opener.open(req, timeout=10)
 csrf = resp.headers.get("X-Updated-Csrf-Token")
 
-AIPROC_ID = "6a99e293016cf703e4042e29"
+aiprocs_url = f"https://{UNVR_HOST}{AIPROCESSORS_API}" + (f"/{AIPROC_ID}" if AIPROC_ID else "")
 
 last_state = None
 last_log_line_count = 0
 
-print("watching... (ctrl-c to stop)", flush=True)
+print(f"watching {aiprocs_url} ... (ctrl-c to stop)", flush=True)
 start = time.time()
 while time.time() - start < 90:
     try:
-        req = urllib.request.Request(f"https://192.0.2.5/proxy/protect/api/aiprocessors/{AIPROC_ID}",
-                                      headers={"X-Csrf-Token": csrf})
+        req = urllib.request.Request(aiprocs_url, headers={"X-Csrf-Token": csrf})
         r = opener.open(req, timeout=5)
         d = json.loads(r.read())
-        snapshot = {k: d.get(k) for k in ["state","canAdopt","isAttemptingToConnect","isAdopting",
-                                            "isAdopted","isProvisioned","connectionHost","lastSeen",
-                                            "connectedSince","name"]}
+        entries = d if isinstance(d, list) else [d]
+        snapshot = [{k: e.get(k) for k in [
+            "state", "canAdopt", "isAttemptingToConnect", "isAdopting", "isAdopted",
+            "isProvisioned", "connectionHost", "lastSeen", "connectedSince", "name",
+            "mac", "modelKey"]}
+            for e in entries]
         if snapshot != last_state:
             print(f"[{time.strftime('%H:%M:%S')}] NVR state change: {snapshot}", flush=True)
             last_state = snapshot
@@ -37,7 +69,7 @@ while time.time() - start < 90:
         print(f"[{time.strftime('%H:%M:%S')}] NVR poll error: {e}", flush=True)
 
     try:
-        rc, out, err = pi_ssh.run("tail -n 200 /root/aikey-emu/run_all.log", timeout=10)
+        rc, out, err = pi_ssh.run(PI_LOG, timeout=10)
         lines = out.splitlines()
         if len(lines) > last_log_line_count:
             for line in lines[last_log_line_count:]:

@@ -1,16 +1,20 @@
 #!/usr/bin/env python3
-"""Outbound mTLS WebSocket ("ucp4") client -- the ongoing connection a real
-AI Key opens to the console immediately after a successful HTTP /api/adopt
-(see ../stage1_http/adopt_http.py, which is what receives the adopt POST
-and writes ../stage1_http/adopt_state.json for this script to pick up).
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 hutchx86
+"""Outbound mTLS WebSocket ("ucp4") client -- the ongoing connection a real AI
+Key opens to the console after ``POST /api/adopt`` (see
+``stage1_http/adopt_http.py``, which writes ``adopt_state.json`` for this
+script to pick up).
 
-Wire protocol CONFIRMED (live-verified against a real controller, for a
-UniFi Protect Chime) in ../PROTOCOL_SPEC.md section 3-4. AI Key's HTTP
-adopt handshake (stage1_http) already matched that spec byte-for-byte
-against our real UNVR, so this reuses the same ucp4 envelope/header
-contract; the RPC action set (section 5 of the spec) is chime-specific and
-NOT assumed correct here -- this client logs every inbound action verbatim
-so the real controller teaches us the aiprocessor-specific ones live.
+The envelope is two concatenated records, each with an 8-byte header:
+``type u8, format u8, compressed u8, reserved u8, length u32 BE``. The length
+is 32-bit: a 16-bit read silently truncates any payload over 64 KiB (the
+controller reads it at offset 4 as a u32). ``format=3`` means the body is raw
+bytes rather than JSON.
+
+AI-Key RPC handlers are the live-confirmed ones from ``../../protocol.md`` §3;
+unknown actions are acked with ``{}`` and logged so the console's own
+``errors.log`` can teach us new shapes.
 """
 import argparse
 import json
@@ -19,110 +23,102 @@ import os
 import re
 import ssl
 import struct
-import subprocess
+import sys
 import threading
 import time
 import uuid
 
 import requests
 import urllib3
-import websockets
 from websockets.sync.client import connect
 
-from system_stats import collect_system_metrics
+_THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+_PROJECT_DIR = os.path.dirname(_THIS_DIR)
+if _PROJECT_DIR not in sys.path:
+    sys.path.insert(0, _PROJECT_DIR)
+
+from core import config  # noqa: E402
+from system_stats import collect_system_metrics  # noqa: E402
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 CONSOLE_INTERNAL_API_PORT = 7444
-MODEL_SERVER_PORT = 7788
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("ucp4-client")
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-ADOPT_STATE_FILE = os.path.join(os.path.dirname(HERE), "stage1_http", "adopt_state.json")
-CERT_PATH = os.path.join(os.path.dirname(HERE), "stage1_http", "server.crt")
-KEY_PATH = os.path.join(os.path.dirname(HERE), "stage1_http", "server.key")
+# UCP4 record header (8 bytes): type, format, compressed, reserved, u32 length.
+RECORD_TYPE_HEAD = 1
+RECORD_TYPE_BODY = 2
+RECORD_FORMAT_JSON = 1
+RECORD_FORMAT_RAW = 3
+
+# --state-dir (or None for the historical stage1_http/ path). Resolved in
+# main(); kept as plain paths here so importing this module has no side effects.
+STATE_DIR = None
+ADOPT_STATE_FILE = os.path.join(config.DEFAULT_STATE_DIR, "adopt_state.json")
+CERT_PATH = os.path.join(config.DEFAULT_STATE_DIR, "server.crt")
+KEY_PATH = os.path.join(config.DEFAULT_STATE_DIR, "server.key")
 
 
-def get_mac(iface: str) -> str:
-    try:
-        with open(f"/sys/class/net/{iface}/address") as f:
-            return f.read().strip().lower()
-    except OSError:
-        node = uuid.getnode()
-        return ":".join(f"{(node >> ele) & 0xff:02x}" for ele in range(40, -8, -8))
-
-
-def get_ip(iface: str) -> str:
-    import socket
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    try:
-        s.connect(("8.8.8.8", 80))
-        return s.getsockname()[0]
-    except OSError:
-        return "0.0.0.0"
-    finally:
-        s.close()
-
-
-def pack_record(record_type: int, payload: dict) -> bytes:
-    body = json.dumps(payload).encode()
-    header = struct.pack(">BB4sH", record_type, 1, b"\x00\x00\x00\x00", len(body))
+def pack_record(record_type: int, payload) -> bytes:
+    if isinstance(payload, (bytes, bytearray)):
+        body = bytes(payload)
+        rec_format = RECORD_FORMAT_RAW
+    else:
+        body = json.dumps(payload).encode()
+        rec_format = RECORD_FORMAT_JSON
+    header = struct.pack(">BBBBI", record_type, rec_format, 0, 0, len(body))
     return header + body
 
 
-def pack_message(head: dict, body: dict) -> bytes:
-    return pack_record(1, head) + pack_record(2, body)
+def pack_message(head: dict, body) -> bytes:
+    return pack_record(RECORD_TYPE_HEAD, head) + pack_record(RECORD_TYPE_BODY, body)
 
 
 def unpack_all_records(data: bytes):
+    """[(record_type, format, obj)] for every complete record in a frame."""
     records = []
     off = 0
     while off < len(data):
         if len(data) - off < 8:
             log.warning("trailing %d bytes, not enough for a record header", len(data) - off)
             break
-        rtype, version, reserved, length = struct.unpack(">BB4sH", data[off:off + 8])
+        rtype, rec_format, _compressed, _reserved, length = struct.unpack(
+            ">BBBBI", data[off:off + 8])
         off += 8
         payload = data[off:off + length]
         off += length
-        try:
-            obj = json.loads(payload)
-        except json.JSONDecodeError:
-            obj = {"_raw": payload.decode(errors="replace")}
-        records.append((rtype, version, obj))
+        if rec_format == RECORD_FORMAT_RAW:
+            obj = {"_raw_bytes": payload}
+        else:
+            try:
+                obj = json.loads(payload)
+            except json.JSONDecodeError:
+                obj = {"_raw": payload.decode(errors="replace")}
+        records.append((rtype, rec_format, obj))
     return records
 
 
 def wait_for_adopt_state(fallback_host_port, poll_interval=1.0, fallback_after=10.0):
-    """Waits for stage1_http to write adopt_state.json from a fresh POST
-    /api/adopt (the normal, token-bearing first-adoption path). But if the
-    device already knows it's adopted server-side (e.g. we restarted and
-    lost our in-memory state, but the controller's own record of us is
-    still isAdopted=true), the controller may never re-POST /api/adopt --
-    per PROTOCOL_SPEC.md section 3, a reconnect after adoption doesn't
-    need a token at all ("device record is marked adopted but has no
-    pinned fingerprint yet: pin this one and accept"). So after a short
-    grace period with no fresh adopt POST, fall back to reconnecting
-    tokenless to the last-known console host.
+    """Wait for stage1_http to write adopt_state.json from a fresh adopt POST.
+
+    If the device is already adopted server-side (restart with no fresh POST),
+    the controller may never re-POST; after the grace period fall back to a
+    tokenless reconnect to the configured console host (the controller's
+    record has our pinned fingerprint and accepts that).
     """
     log.info("waiting for %s to appear (written by stage1_http on a successful adopt POST)...",
-              ADOPT_STATE_FILE)
+             ADOPT_STATE_FILE)
     waited = 0.0
     while True:
         if os.path.exists(ADOPT_STATE_FILE):
-            try:
-                with open(ADOPT_STATE_FILE) as f:
-                    state = json.load(f)
-                if state.get("hosts"):
-                    return state
-            except (OSError, json.JSONDecodeError):
-                pass
+            state = config.read_adopt_state(STATE_DIR)
+            if state.get("hosts"):
+                return state
         if fallback_host_port and waited >= fallback_after:
             log.info("no adopt POST seen after %.0fs -- falling back to tokenless reconnect "
-                      "to %s (device may already be adopted server-side)",
-                      waited, fallback_host_port)
+                     "to %s (device may already be adopted server-side)",
+                     waited, fallback_host_port)
             return {"hosts": [fallback_host_port], "token": None}
         time.sleep(poll_interval)
         waited += poll_interval
@@ -131,7 +127,7 @@ def wait_for_adopt_state(fallback_host_port, poll_interval=1.0, fallback_after=1
 def build_ssl_context():
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE  # per spec: device does not validate controller's cert
+    ctx.verify_mode = ssl.CERT_NONE  # per spec: device does not validate the console cert
     ctx.load_cert_chain(CERT_PATH, KEY_PATH)  # our mTLS client identity
     return ctx
 
@@ -145,14 +141,12 @@ def handle_action(head, body, device_info):
             "mac": device_info["mac_nosep"],
             "type": device_info["type"],
             "version": device_info["version"],
-            "adopted": True,
+            # Read live so ResetToDefaults/readopt can't leave this stale.
+            "adopted": config.is_adopted(STATE_DIR),
             "guid": device_info["guid"],
             "deviceId": device_info["device_id"],
-            "connectionHost": device_info["ip"],
-            # CONFIRMED required (z.string()) via a live Zod validation error
-            # in the real controller's errors.log ("poeType": "Required") --
-            # "unknown" is a value already seen for real in this device's own
-            # bootstrap record (featureFlags.poeType), so it's accepted.
+            # The console's host, not ours (used to build upload URLs).
+            "connectionHost": device_info.get("console_host") or device_info["ip"],
             "poeType": "unknown",
         }
     if action == "networkStatus":
@@ -161,15 +155,7 @@ def handle_action(head, body, device_info):
         log.info("changeUserPassword requested (not persisted in this emulator)")
         return {}
     if action == "systemMetrics":
-        # CONFIRMED exact schema via the real controller's own source
-        # (service.js): fetchMetricsSchema = z.object({
-        #   systemMetrics: z.object({name: z.union([nativeEnum, z.string()]),
-        #                            value: z.number()}).array(),
-        #   aiFeatureMetrics: z.record(z.string(), z.number()).optional()
-        # }). Our first attempt (nested {cpu:{load,temperature},...}) failed
-        # validation server-side with "systemMetrics: Required" (it wants a
-        # top-level array under that exact key) -- found via the real
-        # controller's own errors.log after a live capture.
+        # CONFIRMED schema: a flat top-level array of {name, value} numbers.
         raw = collect_system_metrics()
         ram_total = raw["ram"]["totalKilobytes"]
         ram_avail = raw["ram"]["availableKilobytes"]
@@ -183,12 +169,8 @@ def handle_action(head, body, device_info):
         log.info("systemMetrics -> %s", metrics)
         return {"systemMetrics": metrics}
     if action == "getTaskQueueInfo":
-        # CONFIRMED exact schema via service.js: taskQueueInfoSchema =
-        # z.object({UI_AUDIO_RAM, UI_AUTO_FACE_ENHANCE, UI_AUTO_RAM,
-        # UI_AUTO_STT, UI_MANUAL_FACE_ENHANCE, UI_TASK_NUM} -- all
-        # z.number()). We had been replying `{}`, which silently failed
-        # this same validation on every single 5s poll the whole time.
-        # All zero (no real task queue yet) is a valid response.
+        # CONFIRMED schema: six numeric counters. `{}` fails validation silently
+        # on every ~5 s poll, so all-zero is the correct idle response.
         return {
             "UI_AUDIO_RAM": 0,
             "UI_AUTO_FACE_ENHANCE": 0,
@@ -198,15 +180,8 @@ def handle_action(head, body, device_info):
             "UI_TASK_NUM": 0,
         }
     if action == "recognizeKeyFrames":
-        # CONFIRMED live (real vehicle-detection event on a real camera):
-        # this is the actual "please do deep analysis on this clip" task.
-        # reqUrl/resUrl are relative paths under the console's own internal
-        # API (https://<console-ip>:7444). We fetch the referenced clip
-        # from reqUrl and are expected to POST our analysis result to
-        # resUrl. Response *schema* for resUrl is NOT yet confirmed -- this
-        # posts a placeholder body purely to capture the resulting Zod
-        # validation error from the console's errors.log, the same
-        # technique that solved systemMetrics/getTaskQueueInfo.
+        # Confirmed live: the console asks us to deep-analyse a clip, then we
+        # POST the result (multipart field `ram`) to the console's resUrl.
         threading.Thread(
             target=_post_recognize_result,
             args=(device_info["console_host"], device_info["mac_nosep"], body.get("resUrl"),
@@ -214,36 +189,22 @@ def handle_action(head, body, device_info):
             daemon=True,
         ).start()
     elif action == "RequestAI":
-        # CONFIRMED live, but our first reading of targetUri was backwards:
-        # a real event (2026-09-03 22:53:49Z) dispatched this and the
-        # console's own service.log shows NO inbound connection ever
-        # reaching our :7788 (stage4_modelserver never logged a hit) --
-        # so the console does not call us. targetUri (":7788/v1/models/
-        # <model>/inference", no host) means "call your OWN localhost
-        # service", mirroring ui-infer-gateway's own main.py: it's a local
-        # HTTP client that's meant to hit itself and let the gateway code
-        # own the resUrl callback. Since we don't have a real gateway
-        # running real models yet, do that step ourselves here: compute
-        # the same stub result stage4_modelserver/model_server.py would
-        # return, and POST it (plain JSON, per callback.py -- NOT the
-        # multipart form recognize-anything/RAM needs) to resUrl.
+        # targetUri (":7788/v1/models/<model>/inference") means "call your own
+        # local gateway": there is no console callback into :7788.
         threading.Thread(
             target=_post_request_ai_result,
             args=(device_info["mac_nosep"], body),
             daemon=True,
         ).start()
-    # Unknown/unimplemented action: ack with empty body so we don't hang
-    # the controller's RPC, and we get to see what it does next.
+    # Unknown/unimplemented action: ack with an empty body so the controller's
+    # RPC doesn't hang, and log it so the next real shape can be captured.
     return {}
 
 
 def _second_verifier_result(params: dict) -> dict:
     """Same placeholder shape as stage4_modelserver/model_server.py's
-    _second_verifier_result -- kept in sync manually (small enough that a
-    shared-module import isn't worth the cross-directory wiring). CONFIRMED
-    exact schema from the real models/second_verifier.py docstring; values
-    are placeholders (modelRunStatus "skipped", detector's claimed class
-    echoed back) until real inference is wired up."""
+    _second_verifier_result. Schema confirmed from the real
+    models/second_verifier.py; values stay placeholders until real inference."""
     rows = []
     for entry in params.get("thumbnailMeta") or []:
         ts = entry.get("ts")
@@ -269,6 +230,14 @@ def _second_verifier_result(params: dict) -> dict:
         "inferMs": 0,
         "timeElapsedMs": 0,
         "verificationResults": rows,
+    }
+
+
+def _callback_headers(mac_nosep):
+    return {
+        "x-ident": mac_nosep.upper(),
+        "x-type": "UP-AI-KEY",
+        "x-sysid": "0xa5f0",
     }
 
 
@@ -300,14 +269,9 @@ def _post_request_ai_result(mac_nosep, task_body):
     if not res_url:
         log.warning("RequestAI task had no resUrl, nothing to post (result=%s)", response_body)
         return
-    headers = {
-        "x-ident": mac_nosep.upper(),
-        "x-type": "UP-AI-KEY",
-        "x-sysid": "0xa5f0",
-    }
     try:
-        resp = requests.post(res_url, headers=headers, json=response_body,
-                              cert=(CERT_PATH, KEY_PATH), verify=False, timeout=15)
+        resp = requests.post(res_url, headers=_callback_headers(mac_nosep), json=response_body,
+                             cert=(CERT_PATH, KEY_PATH), verify=False, timeout=15)
         log.info("POST %s -> %s: %s", res_url, resp.status_code, resp.text[:2000])
     except requests.RequestException as e:
         log.warning("POST %s failed: %r", res_url, e)
@@ -316,33 +280,15 @@ def _post_request_ai_result(mac_nosep, task_body):
 def _post_recognize_result(console_host, mac_nosep, res_url, camera_id, event_id):
     """POST our RAM/recognize-anything result to resUrl.
 
-    CONFIRMED from the real firmware's syswrapper.sh (upload_ram()): this is
-    NOT a plain JSON POST (unlike the reverification path) -- it's
-    multipart/form-data with the JSON result under form field name `ram`
-    (`-F "ram=@<file>;type=application/json"`), optionally with additional
-    per-tracker snapshot IMAGE fields (field name = trackerID) for
-    face/lpr/pose results. Headers confirmed identical to every other
-    console-callback in this codebase: x-ident (MAC, no separators,
-    uppercase), x-type: UP-AI-KEY, x-sysid: 0xa5f0, mTLS client cert,
-    verify=False (self-signed console cert). The console's own response body
-    is itself JSON shaped {"ram": {"status": ...}} (syswrapper reads
-    `.ram.status` from it).
-
-    The exact `ram` JSON shape is NOT yet confirmed -- this sends a
-    minimal-but-structurally-plausible stub (informed by the ramDetections
-    Postgres schema: eventId/cameraId identifiers, tag/label arrays) purely
-    to capture the real validation error, the same technique that solved
-    systemMetrics/getTaskQueueInfo/getInfo.
+    CONFIRMED from the real firmware's syswrapper.sh: this is multipart/form-data
+    with the JSON under form field ``ram`` (optionally with per-tracker JPEG
+    fields), not a plain JSON POST. The inner ram shape is still a stub.
     """
     if not res_url:
         log.warning("recognizeKeyFrames task had no resUrl, nothing to post")
         return
-    url = res_url if res_url.startswith("http") else f"https://{console_host}:{CONSOLE_INTERNAL_API_PORT}{res_url}"
-    headers = {
-        "x-ident": mac_nosep.upper(),
-        "x-type": "UP-AI-KEY",
-        "x-sysid": "0xa5f0",
-    }
+    url = res_url if res_url.startswith("http") else \
+        f"https://{console_host}:{CONSOLE_INTERNAL_API_PORT}{res_url}"
     stub_ram_result = {
         "cameraId": camera_id,
         "eventId": event_id,
@@ -351,40 +297,23 @@ def _post_recognize_result(console_host, mac_nosep, res_url, camera_id, event_id
     }
     files = {"ram": ("ram.json", json.dumps(stub_ram_result), "application/json")}
     try:
-        resp = requests.post(url, headers=headers, files=files, cert=(CERT_PATH, KEY_PATH),
-                              verify=False, timeout=15)
+        resp = requests.post(url, headers=_callback_headers(mac_nosep), files=files,
+                             cert=(CERT_PATH, KEY_PATH), verify=False, timeout=15)
         log.info("POST %s -> %s: %s", url, resp.status_code, resp.text[:2000])
     except requests.RequestException as e:
         log.warning("POST %s failed: %r", url, e)
 
 
-def _read_current_token():
-    if not os.path.exists(ADOPT_STATE_FILE):
-        return None
-    try:
-        with open(ADOPT_STATE_FILE) as f:
-            return json.load(f).get("token")
-    except (OSError, json.JSONDecodeError):
-        return None
-
-
 def _watch_for_reconnect(ws, this_connection_token, stop_event, poll_interval=2.0):
-    """A fresh POST /api/adopt (e.g. after the console-side device was
-    removed and re-adopted) means the controller wants a brand-new WSS
-    session carrying the new token -- it will NOT necessarily close our
-    existing connection first. Left alone, this process would sit forever
-    on the old session, the controller would wait forever for a session
-    bearing the new token, and the device would show "instantly offline"
-    right after a fresh adopt. So: watch adopt_state.json for a token
-    different from the one this connection was opened with, and force a
-    reconnect the moment one shows up.
-    """
+    """A fresh adopt POST means the console wants a new WSS session carrying the
+    new token and will not necessarily close the old one. Any token change --
+    including clearing on un-adopt -- makes X-Adopted stale, so tear down."""
     while not stop_event.is_set():
         time.sleep(poll_interval)
-        current = _read_current_token()
-        if current and current != this_connection_token:
-            log.info("new adopt token detected (%s -> %s) -- closing this connection "
-                      "to force a fresh one", this_connection_token, current)
+        current = config.read_token(STATE_DIR)
+        if current != this_connection_token:
+            log.info("adopt token changed (%s -> %s) -- closing this connection "
+                     "to force a fresh one", this_connection_token, current)
             try:
                 ws.close()
             except Exception:
@@ -392,14 +321,15 @@ def _watch_for_reconnect(ws, this_connection_token, stop_event, poll_interval=2.
             return
 
 
-def run(host: str, port: int, token: str, send_token_header: bool, device_info: dict):
+def run(host: str, port: int, token: str, send_token_header: bool, device_info: dict,
+        adopted: bool = True):
     device_info = {**device_info, "console_host": host}
     url = f"wss://{host}:{port}/"
     headers = {
         "X-Ident": device_info["mac_nosep"],
         "X-Mode": "0",
         "X-Type": device_info["type"],
-        "X-Adopted": "true",
+        "X-Adopted": "true" if adopted else "false",
         "X-Ip": device_info["ip"],
         "X-Device-Id": device_info["device_id"],
         "X-Version": device_info["version"],
@@ -417,10 +347,9 @@ def run(host: str, port: int, token: str, send_token_header: bool, device_info: 
 
         stop_watch = threading.Event()
         watcher = threading.Thread(target=_watch_for_reconnect, args=(ws, token, stop_watch),
-                                    daemon=True)
+                                   daemon=True)
         watcher.start()
 
-        # send our own getConsoleInfo request right away, per spec
         req_id = str(uuid.uuid4())
         msg = pack_message(
             {"timestamp": int(time.time() * 1000), "type": "request",
@@ -445,11 +374,12 @@ def _consume(ws, device_info):
         if len(records) < 2:
             log.warning("frame with <2 records: %s", records)
             continue
-        (htype, hver, head), (btype, bver, body) = records[0], records[1]
+        head = records[0][2]
+        body = records[1][2]
 
         if head.get("type") == "response":
             log.info("<<< response to our request id=%s errorCode=%s body=%s",
-                      head.get("id"), head.get("errorCode"), body)
+                     head.get("id"), head.get("errorCode"), body)
             continue
 
         reply_body = handle_action(head, body, device_info)
@@ -461,55 +391,92 @@ def _consume(ws, device_info):
             )
             ws.send(reply)
             log.info(">>> replied to action=%s id=%s body=%s",
-                      head.get("action"), head.get("id"), reply_body)
+                     head.get("action"), head["id"], reply_body)
+
+
+def _split_host_port(host_port, default_port=7442):
+    if ":" in str(host_port):
+        host, port_s = str(host_port).rsplit(":", 1)
+        return host, int(port_s)
+    return str(host_port), default_port
 
 
 def main():
+    cfg = config.load_config_and_logging(sys.argv[1:])
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--iface", default="eth0")
-    ap.add_argument("--type", default="UP-AI-KEY")
-    ap.add_argument("--version", default="2.2.6")
-    ap.add_argument("--device-id", default="00000000-0000-4000-8000-000000000001")
-    ap.add_argument("--guid", default="00000000-0000-4000-8000-000000000002")
+    config.add_common_flags(ap)
+    ap.add_argument("--iface", default=None,
+                    help="interface to derive identity from (never bound); defaults to "
+                         "cfg [network] iface, else the default-route interface")
+    ap.add_argument("--bind-ip", default="0.0.0.0",
+                    help="local IP to report as our own (X-Ip etc); outbound client, "
+                         "so no socket is bound to it")
+    ap.add_argument("--mac", default=None)
+    ap.add_argument("--type", default=cfg["platform"],
+                    help="catalog model string (ucp4 X-Type)")
+    ap.add_argument("--version", default=cfg["fw_version"])
+    ap.add_argument("--device-id", default=cfg["device_id"])
+    ap.add_argument("--guid", default=cfg["guid"])
     ap.add_argument("--fallback-host-port", default=None,
-                     help="e.g. 192.0.2.5:7442 -- used for a tokenless reconnect if no fresh "
-                          "adopt POST shows up within --fallback-after seconds (see "
-                          "wait_for_adopt_state's docstring)")
+                    help="host:port to reconnect to (tokenless) if no fresh adopt POST "
+                         "shows up within --fallback-after seconds")
     ap.add_argument("--fallback-after", type=float, default=10.0)
+    ap.add_argument("--state-dir", default=None,
+                    help="where adopt_state.json/server.crt/server.key live -- defaults "
+                         "to stage1_http/; set this to isolate another instance")
     args = ap.parse_args()
+    args.iface = config.resolve_iface(args.iface, cfg)
 
-    mac_nosep = get_mac(args.iface).replace(":", "")
+    global STATE_DIR, ADOPT_STATE_FILE, CERT_PATH, KEY_PATH
+    STATE_DIR = config.resolve_state_dir(args.state_dir)
+    paths = config.state_paths(STATE_DIR)
+    ADOPT_STATE_FILE, CERT_PATH, KEY_PATH = (
+        paths["adopt_state"], paths["cert"], paths["key"])
+
     device_info = {
-        "mac_nosep": mac_nosep,
+        "mac_nosep": config.resolve_mac(args.iface, args.mac, cfg).lower(),
         "type": args.type,
         "version": args.version,
         "device_id": args.device_id,
         "guid": args.guid,
-        "ip": get_ip(args.iface),
+        "ip": config.advertised_ip(config.resolve_ip(args.iface, cfg, args.bind_ip)),
     }
 
-    last_used_token = None
+    # Tokens are single-use: send X-Token only the first time a value is seen.
+    used_tokens = set()
     backoff = 2
+
     while True:
         state = wait_for_adopt_state(args.fallback_host_port, fallback_after=args.fallback_after)
-        host_port = state["hosts"][0]
-        host, port_s = host_port.rsplit(":", 1)
-        port = int(port_s)
-        # This is the real, current token per adopt_state.json (None if no adopt
-        # POST has ever landed and we're on the tokenless fallback path) -- it's
-        # the baseline the watcher thread compares future file changes against,
-        # so it must NOT be artificially suppressed to None on reconnects (that
-        # bug caused an infinite reconnect loop: the watcher would see the file's
-        # real, unchanged token as "new" relative to a suppressed None baseline,
-        # on every single reconnect).
-        current_token = state.get("token")
-        send_token_header = current_token is not None and current_token != last_used_token
+        hosts = state.get("hosts") or []
+        token = state.get("token")
+        # Canonical adopted predicate (token or hosts), matching getInfo,
+        # /api/info and discovery.
+        adopted = config.is_adopted(STATE_DIR)
+        if not hosts:
+            log.warning("adopt state had no hosts, retrying in 5s")
+            time.sleep(5)
+            continue
         try:
-            run(host, port, current_token, send_token_header, device_info)
-            last_used_token = current_token
+            host, port = _split_host_port(hosts[0])
+        except (TypeError, ValueError):
+            log.warning("malformed adopt state host %r; retrying in 5s", hosts[0])
+            time.sleep(5)
+            continue
+
+        send_token = token is not None and token not in used_tokens
+        if token is not None:
+            used_tokens.add(token)
+        if token is not None and not send_token:
+            log.info("token already used on a prior connection -- reconnecting tokenless "
+                     "(fingerprint should already be pinned)")
+        try:
+            run(host, port, token, send_token, device_info, adopted=adopted)
+            log.warning("ucp4 connection closed cleanly by peer; reconnecting in 3s")
             backoff = 2
+            time.sleep(3)
         except Exception as e:
-            log.warning("WSS connection ended/failed: %r -- reconnecting in %ds", e, backoff)
+            log.warning("connection ended: %r -- reconnecting in %ds", e, backoff)
             time.sleep(backoff)
             backoff = min(backoff * 2, 30)
 

@@ -10,6 +10,18 @@ fw-download/
 *.crt
 .env
 
+# Runtime state: identity tokens/certs and instance leases
+aikey-emu/adopt_state.json
+aikey-emu/adopt_state.json.*.tmp
+aikey-emu/stage1_http/adopt_state.json
+aikey-emu/stage1_http/adopt_state.json.*.tmp
+aikey-emu/instances/
+aikey.cfg.bak-*
+
 # model weights + calibration data are fetched on deploy, never committed
 *.rknn
 rknn_convert/subset/
+
+__pycache__/
+*.pyc
+.venv/

@@ -1,10 +1,15 @@
-#!/usr/bin/env python3
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 hutchx86
 import os, sys, paramiko
 
-HOST = "192.0.2.110"
-PORT = 2200
+HOST = os.environ.get("ORANGEPI_HOST")
+PORT = int(os.environ.get("ORANGEPI_SSH_PORT", "2200"))
 USER = "root"
-PASS = "REDACTED"
+PASS = os.environ.get("ORANGEPI_PASS")
+if not HOST:
+    sys.exit("ORANGEPI_HOST is unset")
+if not PASS:
+    sys.exit("ORANGEPI_PASS is unset")
 
 local_root = sys.argv[1]
 remote_root = sys.argv[2]

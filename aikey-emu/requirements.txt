@@ -1,10 +1,13 @@
+# Runtime dependencies for the AI Key emulator.
 paramiko>=3.4
-grpcio>=1.60
-grpcio-tools>=1.60
-protobuf>=4.25
+grpcio>=1.83.1
+grpcio-tools>=1.83.1
+protobuf>=7.35.1,<8
 websockets>=12.0
 requests>=2.31
+numpy>=1.26
 opencv-python-headless>=4.9
-# rknn-toolkit-lite2 must match the on-device librknnrt version (2.3.2 confirmed
-# working on the Orange Pi 5 Plus); not on PyPI, install from Rockchip's rknn-toolkit2
-# repo wheel for the target Python version instead of listing it here.
+
+# rknn-toolkit-lite2 (stage5_faceid NPU inference) is not on PyPI: install the
+# Rockchip wheel matching librknnrt 2.3.2 from rknn-toolkit2's rknn-toolkit-lite2
+# packages/ directory.

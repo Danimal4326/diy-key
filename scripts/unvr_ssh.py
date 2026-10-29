@@ -1,15 +1,21 @@
-#!/usr/bin/env python3
-import sys, time, paramiko
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 hutchx86
+import os, sys, time, paramiko
 
-HOST = "192.0.2.5"
+HOST = os.environ.get("UNVR_HOST")
+PORT = int(os.environ.get("UNVR_SSH_PORT", "22"))
 USER = "root"
-PASS = "REDACTED"
+PASS = os.environ.get("UNVR_PASS")
+if not HOST:
+    sys.exit("UNVR_HOST is unset")
+if not PASS:
+    sys.exit("UNVR_PASS is unset")
 
-def _handler(title, instructions, prompt_list):
+def _handler(_title, _instructions, prompt_list):
     return [PASS for _ in prompt_list]
 
 def run(cmd, timeout=60):
-    t = paramiko.Transport((HOST, 22))
+    t = paramiko.Transport((HOST, PORT))
     t.connect()
     t.auth_interactive(USER, _handler)
     chan = t.open_session()

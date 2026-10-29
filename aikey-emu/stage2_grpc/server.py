@@ -13,12 +13,17 @@ import os
 import sys
 import threading
 import time
-import uuid
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "generated"))
+_THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+_PROJECT_DIR = os.path.dirname(_THIS_DIR)
+sys.path.insert(0, os.path.join(_THIS_DIR, "generated"))
+if _PROJECT_DIR not in sys.path:
+    sys.path.insert(0, _PROJECT_DIR)
 
 import grpc
 from concurrent import futures
+
+from core import config
 
 from unifi.protect.v1 import api_pb2, api_pb2_grpc, types_pb2 as protect_types_pb2
 from unifi.core.console.v1 import types_pb2 as console_types_pb2
@@ -26,14 +31,6 @@ from unifi.core.console.v1 import types_pb2 as console_types_pb2
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("aikey-grpc-stub")
 
-
-def get_mac(iface: str) -> str:
-    try:
-        with open(f"/sys/class/net/{iface}/address") as f:
-            return f.read().strip().upper().replace(":", "")
-    except OSError:
-        node = uuid.getnode()
-        return "".join(f"{(node >> ele) & 0xff:02x}" for ele in range(40, -8, -8)).upper()
 
 
 class StubAIKeyService(api_pb2_grpc.ProtectAPIServicer):
@@ -101,21 +98,28 @@ class StubAIKeyService(api_pb2_grpc.ProtectAPIServicer):
 
 
 def main():
+    cfg = config.load_config_and_logging(sys.argv[1:])
     ap = argparse.ArgumentParser(description=__doc__)
+    config.add_common_flags(ap)
     ap.add_argument("--port", type=int, default=50051)
-    ap.add_argument("--iface", default="eth0")
-    ap.add_argument("--hostname", default="aikey-emu")
-    ap.add_argument("--fw-version", default="aikey.rk3588.v2.2.6.0.emu.260901.0000")
+    ap.add_argument("--iface", default=None)
+    ap.add_argument("--bind-ip", default="[::]",
+                    help="address to listen on; run_all.py passes the instance's own "
+                         "IP so several instances can share :50051")
+    ap.add_argument("--mac", default=None)
+    ap.add_argument("--hostname", default=cfg["hostname"])
+    ap.add_argument("--fw-version", default=cfg["discovery_fw_version"])
     args = ap.parse_args()
+    args.iface = config.resolve_iface(args.iface, cfg)
 
-    mac = get_mac(args.iface)
+    mac = config.resolve_mac(args.iface, args.mac, cfg)
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
     api_pb2_grpc.add_ProtectAPIServicer_to_server(
         StubAIKeyService(args.hostname, mac, args.fw_version), server
     )
-    server.add_insecure_port(f"[::]:{args.port}")
+    server.add_insecure_port(f"{args.bind_ip}:{args.port}")
     server.start()
-    log.info("gRPC ProtectAPI stub listening on [::]:%d", args.port)
+    log.info("gRPC ProtectAPI stub listening on %s:%d", args.bind_ip, args.port)
     server.wait_for_termination()
 
 

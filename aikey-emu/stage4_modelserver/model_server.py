@@ -39,8 +39,15 @@ import argparse
 import http.server
 import json
 import logging
+import os
+import sys
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+_PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _PROJECT_DIR not in sys.path:
+    sys.path.insert(0, _PROJECT_DIR)
+
+from core import config  # noqa: E402
+
 log = logging.getLogger("model-server")
 
 
@@ -127,12 +134,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
 
 def main():
+    config.load_config_and_logging(sys.argv[1:])
     ap = argparse.ArgumentParser(description=__doc__)
+    config.add_common_flags(ap)
     ap.add_argument("--port", type=int, default=7788)
+    ap.add_argument("--bind-ip", default="0.0.0.0",
+                    help="address to listen on; run_all.py passes the instance's own "
+                         "IP so several instances can share :7788")
     args = ap.parse_args()
 
-    server = http.server.ThreadingHTTPServer(("0.0.0.0", args.port), Handler)
-    log.info("model-server stub listening on 0.0.0.0:%d", args.port)
+    server = http.server.ThreadingHTTPServer((args.bind_ip, args.port), Handler)
+    log.info("model-server stub listening on %s:%d", args.bind_ip, args.port)
     server.serve_forever()
 
 
