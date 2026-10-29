@@ -5,7 +5,7 @@
 
 All listeners are on unprivileged ports (>1024); root is needed for interface
 scoping/macvlan (SO_BINDTODEVICE, dhclient), not for the ports themselves.
-Settings come from aikey.cfg; identity and state paths are resolved once here
+Settings come from diykey.cfg; identity and state paths are resolved once here
 and passed to every stage so they cannot disagree.
 
 Usage:
@@ -63,7 +63,7 @@ def main():
     ap.add_argument("--hostname", default=cfg["hostname"])
     ap.add_argument("--fallback-host-port", default=None,
                     help="console host:port for a tokenless reconnect; defaults to "
-                         "[console] host/port from aikey.cfg")
+                         "[console] host/port from diykey.cfg")
     ap.add_argument("--state-dir", default=None,
                     help="adopt_state.json/server.crt/server.key directory; defaults to "
                          "stage1_http/ (keeps an already-adopted identity)")

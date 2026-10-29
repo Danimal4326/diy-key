@@ -52,7 +52,7 @@ class TestMisc(unittest.TestCase):
         self.assertIn("1.2.3.4:7442", out)
 
     def test_env_overrides_win(self):
-        with mock.patch.dict(os.environ, {"AIKEY_MAC": "fcecdaaabbcc"}):
+        with mock.patch.dict(os.environ, {"DIYKEY_MAC": "fcecdaaabbcc"}):
             self.assertEqual(config.load_config("/nonexistent")["mac"], "fcecdaaabbcc")
 
     def test_load_config_file(self):
@@ -70,7 +70,7 @@ class TestMisc(unittest.TestCase):
 
 class TestResolveIdentity(unittest.TestCase):
     def test_iface_precedence(self):
-        self.assertEqual(config.resolve_iface("ak-main", {"iface": "eth0"}), "ak-main")
+        self.assertEqual(config.resolve_iface("dk-main", {"iface": "eth0"}), "dk-main")
         self.assertEqual(config.resolve_iface(None, {"iface": "enP4p65s0"}), "enP4p65s0")
         self.assertIsInstance(config.resolve_iface(None, {"iface": ""}), str)
 
@@ -104,9 +104,9 @@ class TestResolveIdentity(unittest.TestCase):
             self.assertEqual(config.resolve_ip("eth0", {}, None), "0.0.0.0")
 
     def test_advertised_ip_env(self):
-        with mock.patch.dict(os.environ, {"AIKEY_ADVERTISE_IP": "192.0.2.50"}):
+        with mock.patch.dict(os.environ, {"DIYKEY_ADVERTISE_IP": "192.0.2.50"}):
             self.assertEqual(config.advertised_ip("10.0.0.9"), "192.0.2.50")
-        with mock.patch.dict(os.environ, {"AIKEY_ADVERTISE_IP": ""}):
+        with mock.patch.dict(os.environ, {"DIYKEY_ADVERTISE_IP": ""}):
             self.assertEqual(config.advertised_ip("10.0.0.9"), "10.0.0.9")
 
 

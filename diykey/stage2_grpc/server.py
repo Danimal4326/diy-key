@@ -29,7 +29,7 @@ from unifi.protect.v1 import api_pb2, api_pb2_grpc, types_pb2 as protect_types_p
 from unifi.core.console.v1 import types_pb2 as console_types_pb2
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-log = logging.getLogger("aikey-grpc-stub")
+log = logging.getLogger("diykey-grpc-stub")
 
 
 

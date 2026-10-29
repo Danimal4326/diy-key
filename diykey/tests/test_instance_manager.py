@@ -21,13 +21,13 @@ def entry(**over):
     e = {
         "name": "main",
         "mode": "macvlan",
-        "iface": "ak-main",
+        "iface": "dk-main",
         "parent_iface": "enP3p49s0",
         "mac": "FCECDAAA1101",
         "mac_display": "FC:EC:DA:AA:11:01",
         "device_id": "11111111-2222-3333-4444-555555555555",
-        "hostname": "aikey-emu-main",
-        "state_dir": "/srv/aikey-emu/instances/main",
+        "hostname": "diy-key-main",
+        "state_dir": "/srv/diy-key/instances/main",
         "netmode": "dhcp",
         "ip": "",
         "netmask": "",
@@ -40,7 +40,7 @@ def entry(**over):
 class TestNames(unittest.TestCase):
     def test_unit_name(self):
         self.assertEqual(instance_manager._unit_name("main"),
-                         "aikey-instance-main.service")
+                         "diy-key-instance-main.service")
 
     def test_mac_helpers(self):
         self.assertEqual(instance_manager._mac_with_colons("FCECDAAA1101"),
@@ -61,11 +61,11 @@ class TestBuildUnit(unittest.TestCase):
         self.assertIn("[Unit]", unit)
         self.assertIn("Description=AI Key emulator instance 'main' (macvlan)", unit)
         self.assertIn("WorkingDirectory=" + instance_manager.PROJECT_DIR, unit)
-        self.assertIn("ip link add link enP3p49s0 name ak-main "
+        self.assertIn("ip link add link enP3p49s0 name dk-main "
                       "address FC:EC:DA:AA:11:01 type macvlan mode bridge", unit)
         self.assertIn("dhclient", unit)
-        self.assertIn("-cf /srv/aikey-emu/instances/main/dhclient.conf", unit)
-        self.assertIn("--state-dir /srv/aikey-emu/instances/main", unit)
+        self.assertIn("-cf /srv/diy-key/instances/main/dhclient.conf", unit)
+        self.assertIn("--state-dir /srv/diy-key/instances/main", unit)
         self.assertIn("--mac FCECDAAA1101", unit)
         self.assertIn("--device-id 11111111-2222-3333-4444-555555555555", unit)
         self.assertIn("Restart=on-failure", unit)
@@ -76,15 +76,15 @@ class TestBuildUnit(unittest.TestCase):
     def test_static_unit_uses_prefix(self):
         unit = instance_manager._build_unit(entry(
             netmode="static", ip="10.0.0.50", netmask="255.255.255.0"))
-        self.assertIn("ip addr add 10.0.0.50/24 dev ak-main", unit)
+        self.assertIn("ip addr add 10.0.0.50/24 dev dk-main", unit)
         self.assertNotIn("dhclient", unit)
 
     def test_static_with_gateway(self):
         unit = instance_manager._build_unit(entry(
             netmode="static", ip="10.0.0.50", netmask="255.255.0.0",
             gateway="10.0.0.1"))
-        self.assertIn("ip addr add 10.0.0.50/16 dev ak-main", unit)
-        self.assertIn("ip route add default via 10.0.0.1 dev ak-main", unit)
+        self.assertIn("ip addr add 10.0.0.50/16 dev dk-main", unit)
+        self.assertIn("ip route add default via 10.0.0.1 dev dk-main", unit)
 
     def test_paths_with_spaces_are_quoted(self):
         unit = instance_manager._build_unit(entry(state_dir="/srv/with space/x"))
@@ -95,7 +95,7 @@ class TestBuildUnit(unittest.TestCase):
         self.addCleanup(shutil.rmtree, d, True)
         instance_manager._prepare_state(entry(state_dir=d))
         with open(os.path.join(d, "dhclient.conf")) as f:
-            self.assertEqual(f.read(), 'send host-name "aikey-emu-main";\n')
+            self.assertEqual(f.read(), 'send host-name "diy-key-main";\n')
 
     def test_prepare_state_skips_static(self):
         d = tempfile.mkdtemp()
@@ -123,7 +123,7 @@ class TestRegistry(unittest.TestCase):
         instance_manager._save_registry(reg)
         self.assertEqual(instance_manager._load_registry(), reg)
         with open(instance_manager.REGISTRY_PATH) as f:
-            self.assertEqual(json.load(f)["main"]["iface"], "ak-main")
+            self.assertEqual(json.load(f)["main"]["iface"], "dk-main")
 
     def test_missing_registry_is_empty(self):
         self.assertEqual(instance_manager._load_registry(), {})
@@ -219,7 +219,7 @@ class TestCreateIdentity(unittest.TestCase):
         self.assertEqual(e["mac_display"], "FC:EC:DA:AA:11:01")
         self.assertEqual(e["device_id"], "dev-1")
         self.assertEqual(e["state_dir"], os.path.abspath(state))
-        self.assertEqual(e["iface"], "ak-main")
+        self.assertEqual(e["iface"], "dk-main")
         self.assertEqual(e["ip"], "10.0.0.9")
 
     def test_fresh_identity_defaults(self):

@@ -54,7 +54,7 @@ def ensure_cert(state_dir=None):
     os.chmod(key, 0o600)
     subprocess.run([
         "openssl", "req", "-new", "-x509", "-sha256", "-key", key, "-out", cert,
-        "-days", "36500", "-subj", "/O=aikey-emu/CN=aikey-emu",
+        "-days", "36500", "-subj", "/O=diykey/CN=diykey",
     ], check=True)
     return cert, key
 
@@ -80,7 +80,7 @@ def persist_adopt(state_dir, payload):
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
-    server_version = "aikey-emu-http/0.2"
+    server_version = "diykey-http/0.2"
 
     def _json(self, code, obj):
         body = json.dumps(obj).encode()
@@ -102,7 +102,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         return self.rfile.read(length)
 
     def _info_payload(self):
-        cfg = self.server.aikey_config
+        cfg = self.server.diykey_config
         adopted = config.is_adopted(STATE_DIR)
         return {
             "mac": cfg["mac"],
@@ -223,7 +223,7 @@ def main():
     ip = config.advertised_ip(config.resolve_ip(args.iface, cfg, args.bind_ip))
 
     server = Server((args.bind_ip, args.port), Handler)
-    server.aikey_config = {
+    server.diykey_config = {
         "mac": config.resolve_mac(args.iface, args.mac, cfg),
         "platform": args.platform,
         "sysid": args.sysid,
@@ -239,7 +239,7 @@ def main():
     server.ssl_context = ctx
 
     log.info("HTTPS control API listening on %s:%d (mac=%s platform=%s state=%s)",
-             args.bind_ip, args.port, server.aikey_config["mac"], args.platform, STATE_DIR)
+             args.bind_ip, args.port, server.diykey_config["mac"], args.platform, STATE_DIR)
     server.serve_forever()
 
 

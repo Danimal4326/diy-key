@@ -11,12 +11,12 @@ fw-download/
 .env
 
 # Runtime state: identity tokens/certs and instance leases
-aikey-emu/adopt_state.json
-aikey-emu/adopt_state.json.*.tmp
-aikey-emu/stage1_http/adopt_state.json
-aikey-emu/stage1_http/adopt_state.json.*.tmp
-aikey-emu/instances/
-aikey.cfg.bak-*
+diykey/adopt_state.json
+diykey/adopt_state.json.*.tmp
+diykey/stage1_http/adopt_state.json
+diykey/stage1_http/adopt_state.json.*.tmp
+diykey/instances/
+diykey.cfg.bak-*
 
 # model weights + calibration data are fetched on deploy, never committed
 *.rknn

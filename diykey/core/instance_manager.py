@@ -48,7 +48,7 @@ class InstanceError(Exception):
 
 
 def _unit_name(name):
-    return f"aikey-instance-{name}.service"
+    return f"diy-key-instance-{name}.service"
 
 
 def _unit_path(name):
@@ -239,7 +239,7 @@ def create_instance(name, parent_iface=None, ip=None, netmask=None, gateway=None
     if not _iface_exists(parent_iface):
         raise InstanceError(
             f"parent interface {parent_iface!r} does not exist -- pass --parent-iface or "
-            f"set [network] parent_iface/[network] iface in aikey.cfg")
+            f"set [network] parent_iface/[network] iface in diykey.cfg")
 
     # An already-adopted device must keep its MAC/device-id/state dir: passing
     # all three migrates the existing identity instead of minting a new one.
@@ -252,7 +252,7 @@ def create_instance(name, parent_iface=None, ip=None, netmask=None, gateway=None
     if device_id is not None and not str(device_id).strip():
         raise InstanceError("--device-id must not be empty")
 
-    iface = f"ak-{name}"[:15]
+    iface = f"dk-{name}"[:15]
     state_dir = os.path.abspath(state_dir) if state_dir else os.path.join(INSTANCES_DIR, name)
     os.makedirs(state_dir, exist_ok=True)
 

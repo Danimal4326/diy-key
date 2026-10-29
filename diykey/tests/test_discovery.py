@@ -34,7 +34,7 @@ def build(adopted=False, console_id=None):
     with mock.patch.object(beacon.config, "is_adopted", return_value=adopted), \
          mock.patch.object(beacon.config, "console_id_bytes", return_value=console_id):
         return beacon.build_response(
-            1, 0, mac, ip, "aikey-emu", "2.2.6-test",
+            1, 0, mac, ip, "diy-key", "2.2.6-test",
             "UP-AI-KEY", 0xA5F0, 1234, "device-0001")
 
 
@@ -58,7 +58,7 @@ class TestBuildResponse(unittest.TestCase):
         self.assertEqual(t[beacon.TLV_HW_ADDR], mac)
         self.assertEqual(t[beacon.TLV_IP_INFO], mac + socket.inet_aton("192.0.2.20"))
         self.assertEqual(struct.unpack(">I", t[beacon.TLV_UPTIME])[0], 1234)
-        self.assertEqual(t[beacon.TLV_HOSTNAME], b"aikey-emu")
+        self.assertEqual(t[beacon.TLV_HOSTNAME], b"diy-key")
         self.assertEqual(t[beacon.TLV_PLATFORM], b"UP-AI-KEY")
         self.assertEqual(t[beacon.TLV_FW_VERSION], b"2.2.6-test")
         self.assertEqual(struct.unpack("<H", t[beacon.TLV_SYSID])[0], 0xA5F0)

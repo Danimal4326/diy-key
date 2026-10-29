@@ -38,7 +38,7 @@ class TestStageWiring(unittest.TestCase):
     def test_all_stages_share_identity_and_state(self):
         rc, cmds = self._run(["--iface", "eth0",
                              "--mac", "FC:EC:DA:AA:11:01", "--device-id", "dev-1",
-                             "--hostname", "aikey-test"])
+                             "--hostname", "diy-key-test"])
         self.assertEqual(rc, 1)  # the fake child "exits", so supervision stops
         names = [os.path.basename(c[1]) for c in cmds]
         self.assertEqual(names, ["beacon.py", "adopt_http.py", "ucp4_client.py",
@@ -68,7 +68,7 @@ class TestStageWiring(unittest.TestCase):
         self.assertEqual(wss[wss.index("--fallback-host-port") + 1], "192.0.2.5:7442")
 
     def test_no_fallback_when_console_unset(self):
-        # aikey.cfg ships with a blank console host: never hardcode one.
+        # diykey.cfg ships with a blank console host: never hardcode one.
         _, cmds = self._run(["--iface", "eth0", "--skip-grpc"])
         wss = [c for c in cmds if os.path.basename(c[1]) == "ucp4_client.py"][0]
         self.assertNotIn("--fallback-host-port", wss)

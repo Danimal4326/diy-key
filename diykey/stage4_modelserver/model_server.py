@@ -84,7 +84,7 @@ def _second_verifier_result(params: dict) -> dict:
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
-    server_version = "aikey-emu-modelserver/0.1"
+    server_version = "diykey-modelserver/0.1"
 
     def _json(self, code, obj):
         body = json.dumps(obj).encode()

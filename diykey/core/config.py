@@ -3,8 +3,8 @@
 # Copyright (C) 2026 hutchx86
 """Shared config, device identity and adoption state for the AI Key emulator.
 
-Single source of truth read from ``aikey.cfg`` (INI); CLI flags win over cfg
-values. Defaults to ``<aikey-emu>/aikey.cfg``. Every stage also accepts
+Single source of truth read from ``diykey.cfg`` (INI); CLI flags win over cfg
+values. Defaults to ``<diykey>/diykey.cfg``. Every stage also accepts
 ``--state-dir`` to keep its adopt token/certs apart from other instances.
 """
 import argparse
@@ -16,10 +16,10 @@ import os
 import re
 import subprocess
 
-# core/ -> aikey-emu/ (the directory holding run_all.py and the stages).
+# core/ -> diykey/ (the directory holding run_all.py and the stages).
 PACKAGE_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_DIR = os.path.dirname(PACKAGE_DIR)
-DEFAULT_CONFIG_PATH = os.path.join(PROJECT_DIR, "aikey.cfg")
+DEFAULT_CONFIG_PATH = os.path.join(PROJECT_DIR, "diykey.cfg")
 # Historical location of adopt_state.json/server.crt/server.key; keeping it as
 # the default preserves an already-adopted device's pinned TLS fingerprint.
 DEFAULT_STATE_DIR = os.path.join(PROJECT_DIR, "stage1_http")
@@ -30,7 +30,7 @@ UBNT_OUI = "FCECDA"
 DEFAULTS = {
     # [identity]
     "mac": "",
-    "hostname": "aikey-emu",
+    "hostname": "diy-key",
     # Canonical type in ucp4 X-Type, /api/info and discovery TLV 0x0C.
     "platform": "UP-AI-KEY",
     "discovery_platform": "UP-AI-KEY",
@@ -39,6 +39,8 @@ DEFAULTS = {
     "fw_version": "2.2.6",
     # Discovery advertises a longer firmware string than ucp4's "version".
     "discovery_fw_version": "aikey.rk3588.v2.2.6.0.emu.260901.0000",
+    # Device identity from the live-adopted unit. Changing these (or the MAC
+    # or TLS cert) makes the console see a different device and forces re-adopt.
     "device_id": "00000000-0000-4000-8000-000000000001",
     "guid": "00000000-0000-4000-8000-000000000002",
     # [network]
@@ -55,29 +57,29 @@ DEFAULTS = {
     "debug": "false",
 }
 
-# Env overrides applied after aikey.cfg (container/unit-friendly identity and
-# console config, e.g. -e AIKEY_CONSOLE_HOST=...).
+# Env overrides applied after diykey.cfg (container/unit-friendly identity and
+# console config, e.g. -e DIYKEY_CONSOLE_HOST=...).
 ENV_OVERRIDES = {
-    "AIKEY_MAC": "mac",
-    "AIKEY_HOSTNAME": "hostname",
-    "AIKEY_DEVICE_ID": "device_id",
-    "AIKEY_GUID": "guid",
-    "AIKEY_SYSID": "sysid",
-    "AIKEY_PLATFORM": "platform",
-    "AIKEY_DISCOVERY_PLATFORM": "discovery_platform",
-    "AIKEY_IFACE": "iface",
-    "AIKEY_PARENT_IFACE": "parent_iface",
-    "AIKEY_NETWORK_MODE": "mode",
-    "AIKEY_NETWORK_IP": "ip",
-    "AIKEY_NETWORK_GATEWAY": "gateway",
-    "AIKEY_CONSOLE_HOST": "host",
-    "AIKEY_CONSOLE_PORT": "port",
-    "AIKEY_DEBUG": "debug",
+    "DIYKEY_MAC": "mac",
+    "DIYKEY_HOSTNAME": "hostname",
+    "DIYKEY_DEVICE_ID": "device_id",
+    "DIYKEY_GUID": "guid",
+    "DIYKEY_SYSID": "sysid",
+    "DIYKEY_PLATFORM": "platform",
+    "DIYKEY_DISCOVERY_PLATFORM": "discovery_platform",
+    "DIYKEY_IFACE": "iface",
+    "DIYKEY_PARENT_IFACE": "parent_iface",
+    "DIYKEY_NETWORK_MODE": "mode",
+    "DIYKEY_NETWORK_IP": "ip",
+    "DIYKEY_NETWORK_GATEWAY": "gateway",
+    "DIYKEY_CONSOLE_HOST": "host",
+    "DIYKEY_CONSOLE_PORT": "port",
+    "DIYKEY_DEBUG": "debug",
 }
 
 
 def load_config(path=None):
-    """Parse aikey.cfg into merged settings; a missing file falls back to
+    """Parse diykey.cfg into merged settings; a missing file falls back to
     DEFAULTS. Non-empty ENV_OVERRIDES win over the file."""
     cfg = dict(DEFAULTS)
     path = path or DEFAULT_CONFIG_PATH
@@ -152,7 +154,7 @@ def sysid_int(cfg):
 
 def add_common_flags(ap):
     ap.add_argument("--config", default=None,
-                    help="path to aikey.cfg (default: <aikey-emu>/aikey.cfg)")
+                    help="path to diykey.cfg (default: <diykey>/diykey.cfg)")
     ap.add_argument("--debug", action="store_true", default=None,
                     help="enable debug logging (overrides [logging] debug=true)")
 
@@ -323,9 +325,9 @@ def resolve_ip(iface, cfg=None, bind_ip=None):
 
 
 def advertised_ip(ip):
-    """The IP to tell Protect, when that isn't the one bound: AIKEY_ADVERTISE_IP,
+    """The IP to tell Protect, when that isn't the one bound: DIYKEY_ADVERTISE_IP,
     for a NAT'd/forwarded setup. Only what's reported changes, never what's bound."""
-    return (os.environ.get("AIKEY_ADVERTISE_IP") or "").strip() or ip
+    return (os.environ.get("DIYKEY_ADVERTISE_IP") or "").strip() or ip
 
 
 def netmask_to_prefix(netmask):

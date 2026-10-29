@@ -4,7 +4,7 @@
 
 Hosts and credentials come from the environment; nothing is hardcoded:
   UNVR_HOST (required), UNVR_USER (default opencode), UNVR_PASS (required)
-  AIKEY_INSTANCE (default main -> aikey-instance-main.service)
+  DIYKEY_INSTANCE (default main -> diy-key-instance-main.service)
   AIPROC_ID (optional; all aiprocessors are watched when unset)
   ORANGEPI_LOG (override the journal command entirely)
 """
@@ -28,9 +28,9 @@ if not os.environ.get("UNVR_PASS"):
 
 AIPROCESSORS_API = os.environ.get("AIPROCESSORS_API", "/proxy/protect/api/aiprocessors")
 AIPROC_ID = os.environ.get("AIPROC_ID")
-AIKEY_INSTANCE = os.environ.get("AIKEY_INSTANCE", "main")
+DIYKEY_INSTANCE = os.environ.get("DIYKEY_INSTANCE", "main")
 PI_LOG = os.environ.get(
-    "ORANGEPI_LOG", f"journalctl -u aikey-instance-{AIKEY_INSTANCE} -n 200 --no-pager")
+    "ORANGEPI_LOG", f"journalctl -u diy-key-instance-{DIYKEY_INSTANCE} -n 200 --no-pager")
 
 ctx = ssl.create_default_context()
 ctx.check_hostname = False
