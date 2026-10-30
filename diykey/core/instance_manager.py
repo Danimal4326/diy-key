@@ -171,12 +171,16 @@ def _build_unit(entry):
     lines = [
         "[Unit]",
         f"Description=AI Key emulator instance '{entry['name']}' ({entry['mode']})",
-        "After=network-online.target",
+        # postgresql.service orders after the console's result database when one exists;
+        # a host without PostgreSQL still starts (ordering only, no hard dependency).
+        "After=network-online.target postgresql.service",
         "Wants=network-online.target",
         "",
         "[Service]",
         "Type=simple",
         f"WorkingDirectory={PROJECT_DIR}",
+        # Optional per-instance AI settings (DIYKEY_RAM_MODEL, DIYKEY_CLIP, ...); missing is fine.
+        f"EnvironmentFile=-{os.path.join(entry['state_dir'], 'diykey.env')}",
         *pre_lines,
         f"ExecStart={exec_start}",
         *post_lines,

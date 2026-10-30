@@ -13,8 +13,10 @@ only: no vendor code or binaries in the repo, no console modification.
 
 ## Working rules
 
-- **Commit on the `MacOS` branch**, never `main`. Nothing has been pushed; ask before pushing or
-  opening a PR (the `origin` remote is hutchx86's repo).
+- **Commit Mac-only work on the `MacOS` branch, not `main`.** `main` is the integration branch:
+  it carries this work plus the Linux/RK3588 runtime (see `docs/linux.md`), so changes merged
+  there must keep both targets working. Ask before pushing or opening a PR (the `origin` remote
+  is hutchx86's repo).
 - **Never commit vendor material**: firmware, extracted packages, Protect's `service.js`/UI
   bundle, `ram_tags.csv`, model weights. They live outside the repo (see "Lab" below); reference
   them by path or env var.

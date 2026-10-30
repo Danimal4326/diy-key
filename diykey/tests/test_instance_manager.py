@@ -68,6 +68,8 @@ class TestBuildUnit(unittest.TestCase):
         self.assertIn("--state-dir /srv/diy-key/instances/main", unit)
         self.assertIn("--mac FCECDAAA1101", unit)
         self.assertIn("--device-id 11111111-2222-3333-4444-555555555555", unit)
+        self.assertIn("EnvironmentFile=-/srv/diy-key/instances/main/diykey.env", unit)
+        self.assertIn("After=network-online.target postgresql.service", unit)
         self.assertIn("Restart=on-failure", unit)
         self.assertIn("RestartSec=5", unit)
         self.assertIn("KillMode=control-group", unit)

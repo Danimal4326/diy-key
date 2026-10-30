@@ -21,6 +21,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import ssl
 import struct
 import subprocess
@@ -121,20 +122,57 @@ def _simulate_update(ws, target, body, mac_nosep):
         pass
 
 
+def _psql_path():
+    """psql from DIYKEY_PG_BIN, else PATH, else Homebrew's postgresql@17 (macOS service)."""
+    pg_bin = os.environ.get("DIYKEY_PG_BIN")
+    if pg_bin:
+        return os.path.join(pg_bin, "psql")
+    return shutil.which("psql") or "/opt/homebrew/opt/postgresql@17/bin/psql"
+
+
+def _pg_password_plan(new_password):
+    """(argv, stdin) that gives role ``unifi-protect`` the password Protect rotated to, or
+    (None, reason) when this host has no reachable PostgreSQL.
+
+    macOS service: DIYKEY_PG_SOCKET=<instance>/pg, psql runs as the login user.
+    Linux system PostgreSQL: none needed -- as root psql runs as the postgres OS user over
+    /var/run/postgresql, so peer auth lets it ALTER ROLE. DIYKEY_PG_USER overrides the OS
+    user (any user that can authenticate as a superuser works).
+    """
+    sock = os.environ.get("DIYKEY_PG_SOCKET")
+    user = os.environ.get("DIYKEY_PG_USER")
+    if sys.platform != "darwin" and not sock and os.geteuid() == 0:
+        sock = "/var/run/postgresql"
+        user = user or "postgres"
+    if not sock and not user:
+        return None, "no DIYKEY_PG_SOCKET/DIYKEY_PG_USER"
+    cmd = [_psql_path(), "-d", "postgres", "-q", "-v", "ON_ERROR_STOP=1"]
+    if sock:
+        cmd += ["-h", sock]
+    runuser = shutil.which("runuser")
+    if user and os.geteuid() == 0 and user != "root" and runuser:
+        cmd = [runuser, "-u", user, "--"] + cmd
+    elif user and user != "root":
+        cmd += ["-U", user]
+    # The password never goes in argv (it would show in ps): quoted as a SQL literal instead,
+    # doubling embedded quotes, with backslash escapes off so it is stored verbatim.
+    literal = "'" + new_password.replace("'", "''") + "'"
+    sql = ("SET standard_conforming_strings = on;\n"
+           f'ALTER ROLE "unifi-protect" PASSWORD {literal};\n')
+    return cmd, sql
+
+
 def _apply_pg_password(new_password):
     """Give the instance's PostgreSQL role the password Protect just rotated to, so its
-    first candidate works. psql quotes the value itself (:'pw'), read from stdin."""
-    sock = os.environ.get("DIYKEY_PG_SOCKET")
-    if not sock or not new_password:
-        log.info("changeUserPassword: no DIYKEY_PG_SOCKET, PostgreSQL password left as is")
+    first candidate works."""
+    if not new_password:
         return
-    psql = os.path.join(os.environ.get("DIYKEY_PG_BIN") or "/opt/homebrew/opt/postgresql@17/bin",
-                        "psql")
+    cmd, payload = _pg_password_plan(new_password)
+    if cmd is None:
+        log.info("changeUserPassword: %s; PostgreSQL password left as is", payload)
+        return
     try:
-        r = subprocess.run([psql, "-h", sock, "-d", "postgres", "-q", "-v", "ON_ERROR_STOP=1",
-                            "-v", f"pw={new_password}"],
-                           input="ALTER ROLE \"unifi-protect\" PASSWORD :'pw';\n",
-                           capture_output=True, text=True, timeout=10)
+        r = subprocess.run(cmd, input=payload, capture_output=True, text=True, timeout=10)
     except (OSError, subprocess.SubprocessError) as e:
         log.warning("changeUserPassword: psql failed: %r", e)
         return

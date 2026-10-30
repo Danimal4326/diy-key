@@ -63,6 +63,11 @@ workspace.
 > it from [`docs/macos.md`](docs/macos.md); open work is in [`BACKLOG.md`](BACKLOG.md). Some
 > limitations listed below (placeholder results, video delivery) do not apply on that branch.
 
+> [!NOTE]
+> **Linux / Orange Pi:** the same AI features run on the deployed RK3588 runtime. Instance
+> setup, the per-instance `diykey.env` for the detector/CLIP, and the current limits (CPU
+> inference, shared PostgreSQL, no RKNN path yet) are in [`docs/linux.md`](docs/linux.md).
+
 ## At a glance
 
 |  |  |

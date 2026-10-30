@@ -218,6 +218,45 @@ class TestAdoptStateWait(_StateDirTest):
         self.assertEqual(state, {"hosts": ["10.0.0.5:7442"], "token": None})
 
 
+class TestPgPasswordPlan(unittest.TestCase):
+    """changeUserPassword: the rotated password must reach psql, never argv."""
+
+    def _plan(self, env, platform, euid=1000, which=None):
+        clean = {k: v for k, v in os.environ.items() if not k.startswith("DIYKEY_PG")}
+        clean.update(env)
+        with mock.patch.dict(os.environ, clean, clear=True), \
+                mock.patch.object(ucp4_client.sys, "platform", platform), \
+                mock.patch.object(ucp4_client.os, "geteuid", return_value=euid), \
+                mock.patch.object(ucp4_client.shutil, "which", side_effect=which):
+            return ucp4_client._pg_password_plan("s3cret")
+
+    def test_macos_instance_socket(self):
+        cmd, sql = self._plan({"DIYKEY_PG_SOCKET": "/tmp/pg"}, "darwin", which=lambda n: None)
+        self.assertEqual(cmd[0], "/opt/homebrew/opt/postgresql@17/bin/psql")
+        self.assertEqual(cmd[cmd.index("-h") + 1], "/tmp/pg")
+        self.assertIn("ALTER ROLE \"unifi-protect\" PASSWORD 's3cret'", sql)
+        self.assertNotIn("s3cret", " ".join(cmd))  # ps would show it
+
+    def test_linux_root_uses_the_system_socket_as_postgres(self):
+        cmd, sql = self._plan({}, "linux", euid=0, which=lambda n: {
+            "psql": "/usr/bin/psql", "runuser": "/usr/sbin/runuser"}.get(n))
+        self.assertEqual(cmd[:4], ["/usr/sbin/runuser", "-u", "postgres", "--"])
+        self.assertEqual(cmd[4], "/usr/bin/psql")
+        self.assertEqual(cmd[cmd.index("-h") + 1], "/var/run/postgresql")
+        self.assertIn("PASSWORD 's3cret'", sql)
+
+    def test_no_postgres_configured(self):
+        cmd, reason = self._plan({}, "darwin")
+        self.assertIsNone(cmd)
+        self.assertIn("DIYKEY_PG_SOCKET", reason)
+
+    def test_embedded_quote_is_doubled(self):
+        with mock.patch.dict(os.environ, {"DIYKEY_PG_SOCKET": "/tmp/pg"}, clear=False), \
+                mock.patch.object(ucp4_client.sys, "platform", "darwin"):
+            _, sql = ucp4_client._pg_password_plan("a'b")
+        self.assertIn("PASSWORD 'a''b'", sql)
+
+
 class TestSplitHostPort(unittest.TestCase):
     def test_with_port(self):
         self.assertEqual(ucp4_client._split_host_port("10.0.0.5:7442"), ("10.0.0.5", 7442))
