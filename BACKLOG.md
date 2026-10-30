@@ -3,6 +3,16 @@
 Open items for the macOS / Protect 7.3.70 work on the `MacOS` branch. Newest first within each
 section.
 
+## Next session
+
+- **Tests for the new logic** (pure functions; good local-agent work): `nl_search.parse` (tags,
+  time phrases, the `exact_match` rule), `second_verifier` (box conversion, IoU, verdicts),
+  `ram_tagger.tag_crop`/`describe`/`thumbnail_tags`, `clip_embed.blend`.
+- **Split `stage3_wss/ucp4_client.py`** (847 lines): framing + TLS into `ucp4_proto.py`, AI task
+  handling (RAM video/image, verification, result POSTs) into `ai_tasks.py`, the nl-search loop
+  into `nl_search.py`; keep the connection, setup RPCs and dispatch. No behaviour change; tests
+  first. Also drop the module-level state and in-function `cv2` imports where it falls out.
+
 ## Investigate
 
 - **"Failed to get device details from Network application … 404"** (Protect `service.log`,

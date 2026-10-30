@@ -56,6 +56,13 @@ already-adopted identity, and the component-level detail live in
 [`diykey/README.md`](diykey/README.md) and `implementation.md` in the private
 workspace.
 
+> [!NOTE]
+> **`MacOS` branch:** DIY-Key runs on a Mac against Protect 7.3 with real Basic Understanding
+> tags, Second Stage Verification, retroactive processing, Find Anything search (the AI Key's
+> nl-search connection + CLIP ViT-L/14) and a simulated firmware update. Build, configure and run
+> it from [`docs/macos.md`](docs/macos.md); open work is in [`BACKLOG.md`](BACKLOG.md). Some
+> limitations listed below (placeholder results, video delivery) do not apply on that branch.
+
 ## At a glance
 
 |  |  |
