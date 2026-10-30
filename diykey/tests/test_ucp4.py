@@ -257,6 +257,17 @@ class TestPgPasswordPlan(unittest.TestCase):
         self.assertIn("PASSWORD 'a''b'", sql)
 
 
+class TestTaggerConfig(unittest.TestCase):
+    def test_missing_model_is_reported_once(self):
+        clean = {k: v for k, v in os.environ.items() if k != "DIYKEY_RAM_MODEL"}
+        with mock.patch.dict(os.environ, clean, clear=True), \
+                mock.patch.object(ucp4_client, "_tagger_warned", False):
+            with self.assertLogs("ucp4-client", level="WARNING") as logs:
+                self.assertIsNone(ucp4_client._get_tagger())
+                self.assertIsNone(ucp4_client._get_tagger())
+        self.assertEqual(len([line for line in logs.output if "RAM tagging disabled" in line]), 1)
+
+
 class TestSplitHostPort(unittest.TestCase):
     def test_with_port(self):
         self.assertEqual(ucp4_client._split_host_port("10.0.0.5:7442"), ("10.0.0.5", 7442))

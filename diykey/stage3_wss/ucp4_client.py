@@ -546,13 +546,21 @@ def _post_request_ai_result(mac_nosep, task_body):
 
 _tagger = None
 _tagger_lock = threading.Lock()
+_tagger_warned = False
 
 
 def _get_tagger():
     """The RAM tagger for DIYKEY_RAM_MODEL, loaded once; None when unset or broken."""
-    global _tagger
+    global _tagger, _tagger_warned
     path = os.environ.get("DIYKEY_RAM_MODEL")
     if not path:
+        # Say it once: without a model every recognizeKeyFrames reply is an empty
+        # placeholder, which otherwise looks like successful processing in the log.
+        with _tagger_lock:
+            if not _tagger_warned:
+                _tagger_warned = True
+                log.warning("RAM tagging disabled: DIYKEY_RAM_MODEL is unset -- "
+                            "recognizeKeyFrames results will be empty placeholders")
         return None
     with _tagger_lock:
         if _tagger is None:
