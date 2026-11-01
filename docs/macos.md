@@ -104,6 +104,28 @@ the backlog.
   query's reply for 5 minutes (every repeat resets it), so use new wording after a change.
 - On the console: `/srv/unifi-protect/logs/aiprocessors.log`, `aiprocessors.db.log`, `ds.log`.
 
+## Move to another Mac
+
+**New pairing** (a fresh AI Key on the console; what we did moving Mac-A → Mac-B):
+
+1. In Protect, **Unadopt/Forget** the old AI Key while it is still online, then stop the old
+   service (Ctrl-C in its terminal stops DIY-Key and its PostgreSQL). Nothing in
+   `~/.diy-key/<name>/` needs to come along: a new pairing gets a new identity, cert and database.
+2. On the new Mac: clone, check out `MacOS`, install the prerequisites and build (above).
+3. Copy the files that are not in the repo (vendor material or weights, never committed):
+   - the detector ONNX (e.g. `yolov9-s-320.onnx`) → path in `DIYKEY_RAM_MODEL`;
+   - Protect's `ram_tags.csv` → path in `DIYKEY_RAM_TAGS`;
+   - optional: `~/.diy-key/firmware/` (only to skip re-downloading offered firmware);
+   - the CLIP weights download again on first use (or copy `~/.cache/huggingface/hub/`).
+4. Configure an instance (above) with a **new** MAC, device ID, GUID and a free IP; don't reuse
+   the old identity, or the console may treat it as the old, pinned device.
+5. Run, then adopt in Protect. Retroactive processing starts again for the new AI Key record.
+
+**Same identity** (keep the adoption): stop the old instance, copy all of `~/.diy-key/<name>/`
+(`state/` holds the cert Protect pinned, `pg/` the database Protect migrated), keep
+`DIYKEY_BIND_IP` (Protect remembers the address) or update it in Protect, and fix the paths in
+`diykey.env`.
+
 ## Notes
 
 - Firmware Protect offers is kept in `~/.diy-key/firmware` with its md5; never commit vendor
