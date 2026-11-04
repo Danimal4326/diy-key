@@ -15,8 +15,8 @@ only: no vendor code or binaries in the repo, no console modification.
 
 - **Commit Mac-only work on the `MacOS` branch, not `main`.** `main` is the integration branch:
   it carries this work plus the Linux/RK3588 runtime (see `docs/linux.md`), so changes merged
-  there must keep both targets working. Ask before pushing or opening a PR (the `origin` remote
-  is hutchx86's repo).
+  there must keep both targets working. Both branches are on `origin` (hutchx86's repo); ask
+  before pushing or opening a PR.
 - **Never commit vendor material**: firmware, extracted packages, Protect's `service.js`/UI
   bundle, `ram_tags.csv`, model weights. They live outside the repo (see "Lab" below); reference
   them by path or env var.
@@ -90,10 +90,17 @@ only: no vendor code or binaries in the repo, no console modification.
 
 ## Lab (NorthernMan54's setup — adjust for yours)
 
-- Mac "Mac-A"; instance `main` on en0 alias `192.0.2.18` (not persistent), MAC `FCECDA000001`,
-  adopted by console "Console A" (UCG-Max, `192.0.2.1`, Protect 7.3.70) as "AI Key - Mac-A".
-  Run: `DIYKEY_INSTANCE=main scripts/diykey_service.sh`. PostgreSQL statement logging is on there
-  for debugging.
+- Console "Console A" (UCG-Max, `192.0.2.1`, Protect 7.3.70).
+- 2026-11-01: moving from Mac "Mac-A" to Mac "Mac-B" as a **new pairing** (see docs/macos.md
+  "Move to another Mac"). Mac-A's instance `main` (en0 alias `192.0.2.18`, MAC `FCECDA000001`,
+  "AI Key - Mac-A") is retired: forget it in Protect, don't reuse that MAC/device ID/GUID.
+  On Mac-B: instance `main`, new identity and free IP, run
+  `DIYKEY_INSTANCE=main scripts/diykey_service.sh`. Mac-B also runs the production pi-port
+  AI Port X (MAC `FCECDA000002`): leave it alone, and pick an IP that doesn't clash with its
+  `PIPORT_BIND_IP` aliases.
+- Files Mac-B needs from outside the repo: `yolov9-s-320.onnx` (from pi-port's
+  `piport/models/`), `ram_tags.csv` (from `<protect-extract>/app/fixtures/` or the console's
+  `/usr/share/unifi-protect/app/fixtures/`).
 - Protect extract (7.3.70) with de-minified modules and the 7.3.26 web UI: `<protect-extract>`
   (`service-expanded/modules/`, `unifi-protect-ui-internal/`, `app/fixtures/ram_tags.csv`).
 - AI Key firmware 2.0.4 / 2.2.2 / 2.2.8: archives in `~/.diy-key/firmware/`, unpacked with
