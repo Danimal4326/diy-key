@@ -332,10 +332,8 @@ def destroy_instance(name):
         pass
     _systemctl("daemon-reload")
 
-    # Destroy is a real teardown: the state dir holds the adopt token/certs for
-    # this identity, so a later instance must not silently inherit them. Only
-    # delete dirs this manager owns: an explicit --state-dir may be the shared
-    # stage1_http/ location, which must survive.
+    # Destroy is a real teardown: delete only state dirs this manager owns, never an
+    # external --state-dir (the shared stage1_http/ location must survive).
     state_dir = entry.get("state_dir")
     if state_dir:
         owned_root = os.path.abspath(INSTANCES_DIR) + os.sep

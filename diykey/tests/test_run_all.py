@@ -37,7 +37,7 @@ class TestStageWiring(unittest.TestCase):
 
     def test_all_stages_share_identity_and_state(self):
         rc, cmds = self._run(["--iface", "eth0",
-                             "--mac", "FC:EC:DA:AA:11:01", "--device-id", "dev-1",
+                             "--mac", "FC:EC:DA:00:00:01", "--device-id", "dev-1",
                              "--hostname", "diy-key-test"])
         self.assertEqual(rc, 1)  # the fake child "exits", so supervision stops
         names = [os.path.basename(c[1]) for c in cmds]
@@ -48,7 +48,7 @@ class TestStageWiring(unittest.TestCase):
             args = by_name[stage]
             self.assertIn("--state-dir", args)
             self.assertEqual(args[args.index("--state-dir") + 1], self.d)
-            self.assertEqual(args[args.index("--mac") + 1], "FC:EC:DA:AA:11:01")
+            self.assertEqual(args[args.index("--mac") + 1], "FC:EC:DA:00:00:01")
             self.assertIn("--iface", args)
 
         # gRPC and the model server do not take --state-dir.

@@ -68,11 +68,11 @@ once real inference exists) not yet exercised.
   `.proto` contract. Kept running; not yet confirmed to be used by the
   live flow.
 - **`proto/`** — verbatim `.proto` files from the real `ui-uaibd` package.
-- **`tests/`** — 75 stdlib `unittest` cases covering the shared config/state layer,
+- **`tests/`** — 98 stdlib `unittest` cases covering the shared config/state layer,
   discovery TLVs, ucp4 framing/handlers, adopt persistence/certs, instance units and
   `run_all` wiring. `cd diykey && python3 -m unittest discover -s tests -v`.
 - **`stage5_faceid/`** — real face detection + embedding on the RK3588 NPU, standalone-tested
-  (not yet wired into `run_all.py` or the ucp4/model-server RPC handlers — tracked in the private TODO):
+  (not yet wired into `run_all.py` or the ucp4/model-server RPC handlers — tracked in `BACKLOG.md`):
   - `face_detect.py` — `FaceDetector`, wraps a RetinaFace_mobile320 RKNN model (converted from
     `airockchip/rknn_model_zoo`'s example) via `rknnlite`. ~9ms/frame.
   - `face_embed.py` — `FaceEmbedder` + `align_face()`, wraps a MobileFaceNet RKNN model
@@ -82,10 +82,7 @@ once real inference exists) not yet exercised.
     128-d SFace space (see the private protocol notes §7.1), so it is not enrolment-compatible as-is.
   - `pipeline.py` — `FacePipeline`, combines the two into one `process(image) -> [{bbox, score,
     embedding}]` call. This is the entry point to use once real frames/dispatch are wired in.
-  - `models/` — the converted `.rknn` files plus test images.
-
-(`stage1_sshd/`, an SSH honeypot that turned out to be a dead end for the real
-adoption flow, has been archived and is not part of the active tree.)
+  - `models/` — test images; the `.rknn` models are converted locally and gitignored.
 
 ## Quick start on the Orange Pi
 
@@ -109,7 +106,7 @@ sudo ~/diykey-venv/bin/python run_all.py --iface eth0 --hostname diy-key
 Or let systemd run it as a fixed-identity instance that survives reboot:
 
 ```bash
-sudo python3 core/instance_manager.py create main --parent-iface enP3p49s0
+sudo python3 core/instance_manager.py create main --parent-iface <parent-interface>
 python3 core/instance_manager.py list
 # logs: journalctl -u diy-key-instance-main -f
 ```
@@ -169,10 +166,10 @@ results into Protect.
 
 ## Known open questions / next steps
 
-The private TODO tracks the current, actively-maintained list (facial
-recognition is the active thread; NPU inference, video-frame delivery and
-the gRPC dial question are parked/open there). Adopt-state persistence and
-reboot survival are now handled by `core/config.py` + `core/instance_manager.py`.
+`BACKLOG.md` tracks the current list (facial recognition is the active thread;
+NPU inference, video-frame delivery and the gRPC dial question are open).
+Adopt-state persistence and reboot survival are handled by `core/config.py` +
+`core/instance_manager.py`.
 
 ## Safety / scope note
 

@@ -106,12 +106,12 @@ the backlog.
 
 ## Move to another Mac
 
-**New pairing** (a fresh AI Key on the console; what we did moving Mac-A → Mac-B):
+**New pairing** (a fresh AI Key on the console; e.g. moving to a replacement Mac):
 
 1. In Protect, **Unadopt/Forget** the old AI Key while it is still online, then stop the old
    service (Ctrl-C in its terminal stops DIY-Key and its PostgreSQL). Nothing in
    `~/.diy-key/<name>/` needs to come along: a new pairing gets a new identity, cert and database.
-2. On the new Mac: clone, check out `MacOS`, install the prerequisites and build (above).
+2. On the new Mac: clone, check out `main`, install the prerequisites and build (above).
 3. Copy the files that are not in the repo (vendor material or weights, never committed):
    - the detector ONNX (e.g. `yolov9-s-320.onnx`) → path in `DIYKEY_RAM_MODEL`;
    - Protect's `ram_tags.csv` → path in `DIYKEY_RAM_TAGS`;

@@ -1,41 +1,40 @@
 # DIY-Key backlog
 
-Open items for the macOS / Protect 7.3.70 work on the `MacOS` branch. Newest first within each
-section.
+Open items for the macOS / Protect 7.3.70 work. Newest first within each section.
 
 ## Next session
 
 - **Tests for the new logic** (pure functions; good local-agent work): `nl_search.parse` (tags,
   time phrases, the `exact_match` rule), `second_verifier` (box conversion, IoU, verdicts),
   `ram_tagger.tag_crop`/`describe`/`thumbnail_tags`, `clip_embed.blend`.
-- **Split `stage3_wss/ucp4_client.py`** (847 lines): framing + TLS into `ucp4_proto.py`, AI task
+- **Split `stage3_wss/ucp4_client.py`** (893 lines): framing + TLS into `ucp4_proto.py`, AI task
   handling (RAM video/image, verification, result POSTs) into `ai_tasks.py`, the nl-search loop
   into `nl_search.py`; keep the connection, setup RPCs and dispatch. No behaviour change; tests
   first. Also drop the module-level state and in-function `cv2` imports where it falls out.
 
 ## Investigate
 
-- **"Failed to get device details from Network application … 404"** (Protect `service.log`,
-  2026-10-30 01:10 UTC). Protect asks the UniFi Network application about every adopted device's
-  MAC and logs a 404 for each one Network doesn't know:
+- **"Failed to get device details from Network application … 404"** (Protect `service.log`).
+  Protect asks the UniFi Network application about every adopted device's MAC and logs a 404 for
+  each one Network doesn't know:
   ```
   Failed to get device details from Network application for aa:bb:cc:33:44:cc: 404
   Failed to get device details from Network application for aa:bb:cc:33:44:bb: 404
   Failed to get device details from Network application for aa:bb:cc:33:44:aa: 404
-  Failed to get device details from Network application for 80:be:af:92:83:56: 404
+  Failed to get device details from Network application for 02:00:00:00:00:01: 404
   Failed to get device details from Network application for fc:ec:da:00:00:01: 404
   Failed to get device details from Network application for fc:ec:da:00:00:02: 404
-  Failed to get device details from Network application for 02:a0:c6:ff:20:1f: 404
+  Failed to get device details from Network application for 02:00:00:00:00:03: 404
   ```
-  `fc:ec:da:00:00:01` is this DIY-Key instance (main); the others are the emulated cameras
-  (`aa:bb:cc:33:44:*`, unifi-cam-proxy), the ONVIF camera, pi-port's AI Port
-  (`fc:ec:da:00:00:02`) and `02:a0:c6:ff:20:1f`. Emulated devices are not Network clients/devices
-  with these MACs, so this is probably harmless noise. To check: which call makes it (find the
-  message in `service.js`), what Protect uses the details for (uplink, PoE port, topology?), and
-  whether anything a device reports (e.g. `getInfo`, discovery) could satisfy it.
-- ~~**First search after a cold start hung in the UI**~~ (fixed: second search 0.3 s, 2026-10-29) (2026-10-29 21:09): `NL_PARSE` took ~10 s
-  while CLIP loaded. CLIP now preloads at start (22f436e); confirm the UI no longer hangs, and
-  check `http.log` for the `/api/detection-nls` duration.
+  `fc:ec:da:00:00:01` is this DIY-Key instance; the others are emulated cameras
+  (`aa:bb:cc:33:44:*`, unifi-cam-proxy), an ONVIF camera, an AI Port and another emulated camera.
+  None are Network clients with these MACs, so this is probably harmless noise. To check: which
+  call makes it (find the message in `service.js`), what Protect uses the details for (uplink,
+  PoE port, topology?), and whether anything a device reports (e.g. `getInfo`, discovery) could
+  satisfy it.
+- ~~**First search after a cold start hung in the UI**~~ (fixed 2026-10-29: CLIP preloads at
+  start, `22f436e`; a second search took 0.3 s). Still to confirm: the UI no longer hangs, and
+  `http.log` shows the `/api/detection-nls` duration.
 - **`X-Token` re-sent after every restart**: `used_tokens` is per process, so a fresh start sends
   the old single-use token again. The console still accepts the connection; check whether it
   should only be sent before adoption completes.
@@ -44,7 +43,10 @@ section.
 
 ## Verify live
 
-- ~~Find Anything returns results: exact (`car`), vector (`night`)~~ verified 2026-10-29 (night car event found; UI slider = min similarity, applied after the SQL). Still to check: `IMAGE_SEARCH`, and whether the 0.1 tag blend holds up with many rows and daytime crops.
+- ~~Find Anything returns results: exact (`car`), vector (`night`)~~ verified 2026-10-29 (night
+  car event found; UI slider = min similarity, applied after the SQL).
+- Still to check: `IMAGE_SEARCH`, and whether the 0.1 tag blend holds up with many rows and
+  daytime crops.
 - Second Stage Verification on a real `RequestAI` (`second_verifier_mlabel`) task.
 - `thumbnailTags` rows for image (retroactive) tasks, not just video tasks.
 

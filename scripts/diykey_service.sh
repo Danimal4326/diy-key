@@ -1,21 +1,7 @@
 #!/bin/bash
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# Run one DIY-Key instance on macOS and restart it without a new terminal.
-#
-#   DIYKEY_INSTANCE=main scripts/diykey_service.sh     in a terminal ("main" when not set)
-#
-# Each instance's files are in ~/.diy-key/$DIYKEY_INSTANCE/ (see scripts/diykey_paths.sh).
-# Settings come from its diykey.env (see scripts/diykey.env.example): DIYKEY_* keys, one
-# KEY=value per line, re-read on every restart. Only those keys are taken; the file is never
-# run as a script. DIYKEY_BIND_IP binds the listeners and the outbound ucp4 connection to that
-# address, so several instances can share a Mac, each with its own PostgreSQL in pg/.
-#
-#   touch ~/.diy-key/main/restart     restart DIY-Key (new code, new settings)
-#   Ctrl-C in this terminal           stop it and the instance's PostgreSQL
-#
-# If DIY-Key exits on its own it is restarted after 5 s. Output goes to the instance's
-# logs/diykey.log, rotated by size (DIYKEY_LOG_MAX_MB, 50 by default; DIYKEY_LOG_KEEP old files,
-# 5), and to the terminal when there is one. caffeinate keeps the Mac awake while this runs.
+# Run one DIY-Key instance on macOS from ~/.diy-key/<name>/ (see scripts/diykey_paths.sh).
+# Touch restart to reload settings; Ctrl-C stops it and its PostgreSQL.
 set -u
 
 USER_HOME=$(eval echo "~${SUDO_USER:-${USER:-$(id -un)}}")

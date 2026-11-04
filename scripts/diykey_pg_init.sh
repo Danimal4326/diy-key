@@ -1,15 +1,7 @@
 #!/bin/bash
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# Create an instance's own PostgreSQL in ~/.diy-key/$DIYKEY_INSTANCE/pg/ for Protect's AI
-# results ("main" when DIYKEY_INSTANCE is not set). Reads DIYKEY_BIND_IP and
-# DIYKEY_CONSOLE_HOST from the instance's diykey.env.
-#
-#   DIYKEY_INSTANCE=main scripts/diykey_pg_init.sh
-#
-# Protect connects to <bind ip>:5432 as unifi-protect/unifi-protect, database unifi-protect,
-# over SSL without checking the certificate, and migrates its own schema (pgvector needed). The
-# cluster listens on the instance's address only and admits that role from the console only.
-# Needs Homebrew's postgresql@17 and pgvector. diykey_service.sh starts and stops it.
+# Create an instance's PostgreSQL for Protect's AI results (Homebrew postgresql@17 + pgvector).
+# Reads DIYKEY_BIND_IP and DIYKEY_CONSOLE_HOST; diykey_service.sh starts and stops it.
 set -eu
 
 USER_HOME=$(eval echo "~${SUDO_USER:-${USER:-$(id -un)}}")

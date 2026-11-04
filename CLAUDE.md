@@ -23,8 +23,8 @@ only: no vendor code or binaries in the repo, no console modification.
 - New files carry `# SPDX-License-Identifier: AGPL-3.0-or-later`. Match the surrounding style:
   module docstring that explains the *why* and cites what was confirmed live.
 - Every RPC/schema fact should come from Protect's code or a live capture, and say which.
-- Tests: `venv/bin/python -m unittest discover -s diykey/tests` (3 `test_run_all` errors are
-  macOS-only and known). New pure logic gets tests (see BACKLOG "Next session").
+- Tests: `venv/bin/python -m unittest discover -s diykey/tests`. New pure logic gets tests
+  (see BACKLOG "Next session").
 - Restart a running instance after code changes: `touch ~/.diy-key/<instance>/restart`.
 
 ## Layout (diykey/)
@@ -34,7 +34,7 @@ only: no vendor code or binaries in the repo, no console modification.
 | `core/config.py` | Config/identity (`diykey.cfg` + `DIYKEY_*` env), state files, log redaction, firmware version pin |
 | `stage1_discovery/beacon.py` | UBNT discovery UDP/10001 |
 | `stage1_http/adopt_http.py` | HTTPS :8080 (`/api/info` GET+POST, `/api/adopt`) |
-| `stage3_wss/ucp4_client.py` | ucp4 to the console :7442, setup RPCs, AI task dispatch, nl-search loop (847 lines; split planned) |
+| `stage3_wss/ucp4_client.py` | ucp4 to the console :7442, setup RPCs, AI task dispatch, nl-search loop (893 lines; split planned) |
 | `stage3_wss/clip_fetch.py` | Fetch task clips (as MP4) / images from the console, grab frames |
 | `stage3_wss/ram_tagger.py` | COCO ONNX detector → Protect RAM tags, descriptions, per-object `thumbnailTags` |
 | `stage3_wss/second_verifier.py` | Second Stage Verification (`RequestAI` → `second_verifier_mlabel`) |
@@ -88,26 +88,12 @@ only: no vendor code or binaries in the repo, no console modification.
 - Camera attributes (e.g. `color: white`) can be wrong; CLIP/detector results disagreeing with
   them is not necessarily a bug.
 
-## Lab (NorthernMan54's setup — adjust for yours)
+## Lab (example setup — adjust for yours)
 
-- Console "Console A" (UCG-Max, `192.0.2.1`, Protect 7.3.70).
-- 2026-11-01: moving from Mac "Mac-A" to Mac "Mac-B" as a **new pairing** (see docs/macos.md
-  "Move to another Mac"). Mac-A's instance `main` (en0 alias `192.0.2.18`, MAC `FCECDA000001`,
-  "AI Key - Mac-A") is retired: forget it in Protect, don't reuse that MAC/device ID/GUID.
-  On Mac-B: instance `main`, new identity and free IP, run
-  `DIYKEY_INSTANCE=main scripts/diykey_service.sh`. Mac-B also runs the production pi-port
-  AI Port X (MAC `FCECDA000002`): leave it alone, and pick an IP that doesn't clash with its
-  `PIPORT_BIND_IP` aliases.
-- Files Mac-B needs from outside the repo: `yolov9-s-320.onnx` (from pi-port's
-  `piport/models/`), `ram_tags.csv` (from `<protect-extract>/app/fixtures/` or the console's
-  `/usr/share/unifi-protect/app/fixtures/`).
-- Protect extract (7.3.70) with de-minified modules and the 7.3.26 web UI: `<protect-extract>`
+- Console "Console A" (UCG-Max, `192.0.2.1`, Protect 7.3.70); each Mac runs one instance on an
+  interface alias (`192.0.2.18`) with its own MAC, device ID, GUID and PostgreSQL.
+- Outside the repo: the detector ONNX (pi-port's `yolov9-s-320.onnx`), Protect's `ram_tags.csv`
+  and firmware archives in `~/.diy-key/firmware/`.
+- Protect extract (7.3.70) with de-minified modules: `<protect-extract>/`
   (`service-expanded/modules/`, `unifi-protect-ui-internal/`, `app/fixtures/ram_tags.csv`).
-- AI Key firmware 2.0.4 / 2.2.2 / 2.2.8: archives in `~/.diy-key/firmware/`, unpacked with
-  `INVENTORY.md` in `<aikey-fw>/` (most agents are readable Python). The models are TensorRT
-  engines for Jetson Orin; only the 2.0.4 VLM (`model.safetensors`) and TTS ONNX are portable.
-- Detector model: pi-port's `yolov9-s-320.onnx`. The sibling **pi-port** project (AI Port
-  emulator) shares the plumbing; see `CREDITS.md`.
 - Console logs worth tailing: `/srv/unifi-protect/logs/{aiprocessors,aiprocessors.db,service,errors,ds}.log`.
-- Optional local LLM helper on the LAN (`<local-llm>/mtplx-ask` / `mtplx-agent`, see the user's global
-  CLAUDE.md) for tests and summaries; it needs `max_tokens` ≥ 8192 for code reading.

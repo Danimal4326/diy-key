@@ -10,7 +10,7 @@ and passed to every stage so they cannot disagree.
 
 Usage:
   sudo python3 run_all.py --iface eth0
-  sudo python3 run_all.py --state-dir instances/main --mac FC:EC:DA:AA:11:01
+  sudo python3 run_all.py --state-dir instances/main --mac FC:EC:DA:00:00:01
 """
 import argparse
 import os

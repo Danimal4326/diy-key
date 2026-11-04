@@ -1,39 +1,8 @@
 #!/usr/bin/env python3
 """Model-serving HTTP endpoint on :7788, matching the real ui-infer-gateway.
 
-CONFIRMED both live (a real captured `RequestAI` task over the ucp4
-WebSocket, see ../stage3_wss/ucp4_client.py's handle_action) AND from the
-real firmware's own source (ui-infer-gateway package: main.py + schemas.py
-+ models/second_verifier.py, extracted into ../../extracted/deb_extracted/
-ui-infer-gateway-0.0.1.12-Linux/). The real service is a FastAPI app:
-
-  GET  /health
-  GET  /v1/models
-  GET  /v1/models/{name}
-  POST /v1/models/{name}/inference
-
-Request body (schemas.InferenceRequest): {action, params, resUrl}.
-Response body (schemas.InferenceResponse): {model, action,
-inference_time_ms, result}. If `resUrl` was set, the real gateway also
-POSTs this same body to it (see utils/callback.py: x-ident/x-type/x-sysid
-headers + mTLS cert + verify=False, identical to every other console
-callback in this codebase) -- NOT implemented here yet, since our
-ucp4_client.py already handles resUrl delivery for the WSS-dispatched
-`recognizeKeyFrames` path; this server's job is just the direct
-`RequestAI`/targetUri calls.
-
-Two models are configured in the real config.yaml: `ppe_mlabel` (helmet/
-vest/full-body PPE classifier) and `second_verifier_mlabel` (the one
-captured live -- Person/Vehicle/Animal reverification). For
-second_verifier_mlabel, the real `result` shape (models/second_verifier.py
-docstring) is:
-  {"cameraId", "eventId", "status", "scoreThresholdApplied",
-   "preProcessMs", "inferMs", "timeElapsedMs", "verificationResults": [
-     {"thumbnailMs", "trackerID", "objectType", "isValidDetection",
-      "detectedAs", "modelRunStatus", "iouScore", "detectionConfidence",
-      "detectionConfidenceList": [{"class", "score"}, ...]}, ...]}
-This stub returns that exact shape (with placeholder values -- no real
-inference happens here yet).
+Confirmed live and from the firmware's ui-infer-gateway package. Returns the real
+`second_verifier_mlabel` result shape with placeholder values.
 """
 import argparse
 import http.server

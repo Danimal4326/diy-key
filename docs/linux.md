@@ -1,9 +1,9 @@
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
 # DIY-Key on Linux (Orange Pi 5 Plus / RK3588)
 
-How to run the AI work from the `MacOS` branch on the deployed runtime: Debian/Ubuntu on an
-Orange Pi 5 Plus, one systemd unit per instance, a system PostgreSQL with pgvector. The macOS
-workflow is unchanged; see [`macos.md`](macos.md).
+How to run the AI work on the deployed runtime: Debian/Ubuntu on an Orange Pi 5 Plus, one
+systemd unit per instance, a system PostgreSQL with pgvector. The macOS workflow is unchanged;
+see [`macos.md`](macos.md).
 
 ## What runs where
 
@@ -42,15 +42,14 @@ Create the unit as before (identity is fixed at creation):
 
 ```bash
 cd diykey
-sudo python3 core/instance_manager.py create main --parent-iface enP4p65s0 \
-  --mac FC:EC:DA:AA:11:01 --device-id 00000000-0000-4000-8000-000000000001 \
-  --state-dir instances/main
+sudo python3 core/instance_manager.py create main --parent-iface <board-nic> \
+  --mac FC:EC:DA:00:00:01 --device-id <device-id> --state-dir instances/main
 ```
 
 Then put the AI settings in the per-instance env file the unit reads:
 
 ```bash
-sudo tee /srv/projects/diy-key/diy-key-git/diykey/instances/main/diykey.env >/dev/null <<'EOF'
+sudo tee /path/to/diy-key/diykey/instances/main/diykey.env >/dev/null <<'EOF'
 # COCO ONNX detector (Ultralytics anchor-free export, e.g. pi-port's yolov9-s-320.onnx).
 DIYKEY_RAM_MODEL=/root/models/yolov9-s-320.onnx
 # Find Anything (CLIP ViT-L/14 + the nl-search WebSocket). Optional, heavy.
@@ -85,6 +84,6 @@ the first `recognizeKeyFrames` task followed by `event …: <description>` and
   not implemented.
 - **One shared PostgreSQL.** The console's result database is the host cluster, so several
   instances on one board would share `:5432`; the macOS per-instance cluster is not used.
-- **Not yet verified live on the board.** The merged code passes the unit tests on Linux; the
-  RAM/CLIP/search paths have only been exercised on macOS against Protect 7.3.70.
+- **RAM verified, CLIP not.** RAM tagging ran live on the board (2026-10-30, CPU); CLIP and
+  Find Anything have only been exercised on macOS against Protect 7.3.70.
 - `scripts/diykey_*.sh` remain the macOS service; the Linux path is systemd only.

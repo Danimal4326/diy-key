@@ -81,10 +81,10 @@ class TestResolveIdentity(unittest.TestCase):
             {"parent_iface": "", "iface": "enP4p65s0"}), "enP4p65s0")
 
     def test_mac_override_strips_separators(self):
-        self.assertEqual(config.resolve_mac("eth0", "fc:ec:da:aa:11:01", {}),
-                         "FCECDAAA1101")
-        self.assertEqual(config.resolve_mac("eth0", None, {"mac": "fc-ec-da-aa-11-02"}),
-                         "FCECDAAA1102")
+        self.assertEqual(config.resolve_mac("eth0", "fc:ec:da:00:00:01", {}),
+                         "FCECDA000001")
+        self.assertEqual(config.resolve_mac("eth0", None, {"mac": "fc-ec-da-00-00-02"}),
+                         "FCECDA000002")
 
     def test_mac_prepends_ubnt_oui(self):
         with mock.patch.object(config, "_iface_mac", return_value="001122334455"):

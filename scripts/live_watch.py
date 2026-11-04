@@ -3,7 +3,7 @@
 """Watch an AI Key's Protect record and its journald log side by side.
 
 Hosts and credentials come from the environment; nothing is hardcoded:
-  UNVR_HOST (required), UNVR_USER (default opencode), UNVR_PASS (required)
+  UNVR_HOST (required), UNVR_USER (default root), UNVR_PASS (required)
   DIYKEY_INSTANCE (default main -> diy-key-instance-main.service)
   AIPROC_ID (optional; all aiprocessors are watched when unset)
   ORANGEPI_LOG (override the journal command entirely)
@@ -22,7 +22,7 @@ import pi_ssh  # noqa: E402
 UNVR_HOST = os.environ.get("UNVR_HOST")
 if not UNVR_HOST:
     sys.exit("UNVR_HOST is unset")
-UNVR_USER = os.environ.get("UNVR_USER", "opencode")
+UNVR_USER = os.environ.get("UNVR_USER", "root")
 if not os.environ.get("UNVR_PASS"):
     sys.exit("UNVR_PASS is unset")
 

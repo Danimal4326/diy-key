@@ -39,8 +39,7 @@ DEFAULTS = {
     "fw_version": "2.2.6",
     # Discovery advertises a longer firmware string than ucp4's "version".
     "discovery_fw_version": "aikey.rk3588.v2.2.6.0.emu.260901.0000",
-    # Device identity from the live-adopted unit. Changing these (or the MAC
-    # or TLS cert) makes the console see a different device and forces re-adopt.
+    # Override per instance; keep stable once adopted (changing it forces re-adopt).
     "device_id": "00000000-0000-4000-8000-000000000001",
     "guid": "00000000-0000-4000-8000-000000000002",
     # [network]
@@ -418,9 +417,8 @@ def clear_adopt_state(state_dir=None):
     atomic_write_json(adopt_state_path(state_dir), {})
 
 
-# Firmware version: the one place every stage reads it. diykey.cfg / DIYKEY_FW_VERSION is
-# the factory version; a simulated updateFirmware pins the new one in <state>/fw_version.json,
-# which wins from then on. Read live, so discovery, /api/info and ucp4 agree without a restart.
+# Factory version; a simulated update pins the real one in <state>/fw_version.json, read live
+# so discovery, /api/info and ucp4 agree without a restart.
 def fw_version_path(state_dir=None):
     return os.path.join(state_dir_path(state_dir), "fw_version.json")
 

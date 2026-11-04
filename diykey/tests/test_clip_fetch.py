@@ -17,11 +17,11 @@ import clip_fetch  # noqa: E402
 
 class TestClipFetch(unittest.TestCase):
     def test_mp4_url_relative(self):
-        result = clip_fetch.mp4_url('192.0.2.1', 7444,
+        result = clip_fetch.mp4_url('198.51.100.1', 7444,
             '/internal/aiprocessors/video/export?camera=c&format=ubv&mute=true')
         self.assertEqual(
             result,
-            'https://192.0.2.1:7444/internal/aiprocessors/video/export?camera=c&format=mp4&mute=true'
+            'https://198.51.100.1:7444/internal/aiprocessors/video/export?camera=c&format=mp4&mute=true'
         )
 
     def test_mp4_url_absolute_kept(self):
@@ -72,7 +72,6 @@ class TestClipFetch(unittest.TestCase):
 
     def test_prune_missing_dir(self):
         clip_fetch.prune('/nonexistent/dir/xyz')
-        self.assertTrue(True)  # No exception raised
 
 
 if __name__ == "__main__":

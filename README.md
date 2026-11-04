@@ -57,16 +57,15 @@ already-adopted identity, and the component-level detail live in
 workspace.
 
 > [!NOTE]
-> **`MacOS` branch:** DIY-Key runs on a Mac against Protect 7.3 with real Basic Understanding
-> tags, Second Stage Verification, retroactive processing, Find Anything search (the AI Key's
-> nl-search connection + CLIP ViT-L/14) and a simulated firmware update. Build, configure and run
-> it from [`docs/macos.md`](docs/macos.md); open work is in [`BACKLOG.md`](BACKLOG.md). Some
-> limitations listed below (placeholder results, video delivery) do not apply on that branch.
+> **macOS:** DIY-Key runs on a Mac against Protect 7.3 with real Basic Understanding tags, Second
+> Stage Verification, retroactive processing, Find Anything search (the AI Key's nl-search
+> connection + CLIP ViT-L/14) and a simulated firmware update. Build, configure and run it from
+> [`docs/macos.md`](docs/macos.md); open work is in [`BACKLOG.md`](BACKLOG.md).
 
 > [!NOTE]
-> **Linux / Orange Pi:** the same AI features run on the deployed RK3588 runtime. Instance
-> setup, the per-instance `diykey.env` for the detector/CLIP, and the current limits (CPU
-> inference, shared PostgreSQL, no RKNN path yet) are in [`docs/linux.md`](docs/linux.md).
+> **Linux / Orange Pi:** the AI stages run on the deployed RK3588 runtime. Instance setup, the
+> per-instance `diykey.env` for the detector/CLIP, and the current limits (CPU inference, shared
+> PostgreSQL, no RKNN path yet) are in [`docs/linux.md`](docs/linux.md).
 
 ## At a glance
 
@@ -124,7 +123,7 @@ adoption; the token is single-use.
 - Real RK3588 telemetry (CPU, GPU, NPU, memory) and a flat `systemMetrics` shape.
 - Task plumbing for RAM/reverification results, multipart `ram` upload and the
   console's `/internal/aiprocessors/*` callbacks.
-- Shared config/state layer, per-instance systemd units, and 75 unit tests.
+- Shared config/state layer, per-instance systemd units, and 98 unit tests.
 - Face detection (`RetinaFace_mobile320`) and embedding (`w600k_mbf`) running on
   the RK3588 NPU — see the limitation below before using the embeddings.
 
@@ -187,7 +186,7 @@ console pins the fingerprint.
 No hardware needed:
 
 ```bash
-cd diykey && python3 -m unittest discover -s tests -v   # 75 tests
+cd diykey && python3 -m unittest discover -s tests -v   # 98 tests
 ```
 
 Verified live on an Orange Pi 5 Plus against a real UNVR (2026-09-07): discovery,
@@ -196,21 +195,22 @@ placeholder results accepted (HTTP 200). The protocol facts are documented in th
 private `protocol.md` (§1 discovery, §2 adoption, §3 ucp4, §5 inference contracts,
 §6 Postgres, §7 face recognition, §7.1 face-DB embedding space).
 
-Not verified in this revision: a full deploy of the imported infrastructure to
-the board (the board still runs the pre-import tree), the gRPC service being
-dialled by a console, and any real inference/face result delivered end to end.
+Verified on the board since 2026-10-30: systemd instance, adoption, RAM tagging
+and event delivery. Not yet verified: CLIP/Find Anything on the board, the gRPC
+service being dialled by a console, and face results delivered end to end.
 
 ## Known limitations
 
 - **Face embeddings are the wrong space for Protect.** Protect's face library is
   128-d SFace; `stage5_faceid/` uses 512-d MobileFaceNet. Detection/alignment are
   fine; the embeddings cannot be enrolled as-is (`protocol.md` §7.1).
-- `recognizeKeyFrames`/`RequestAI` results are structurally valid placeholders;
-  no real second-verifier, RAM, LPR or face inference is wired in.
+- RAM tagging and second-stage verification need `DIYKEY_RAM_MODEL`; without it
+  the result is a placeholder. LPR, speech-to-text and VLM descriptions are not
+  implemented.
 - The gRPC `ProtectAPI` server is a stub; no console has been observed dialling it.
 - Video-frame delivery is unsolved for the AI-Key path (on-demand clip fetch is
   the likely route; not implemented).
-- The project is paused; the remaining work is tracked in the private `todo.md`.
+- Open work is tracked in [`BACKLOG.md`](BACKLOG.md).
 
 ## Credits
 

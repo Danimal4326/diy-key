@@ -25,3 +25,4 @@ rknn_convert/subset/
 __pycache__/
 *.pyc
 .venv/
+venv/

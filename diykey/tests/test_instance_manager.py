@@ -23,8 +23,8 @@ def entry(**over):
         "mode": "macvlan",
         "iface": "dk-main",
         "parent_iface": "enP3p49s0",
-        "mac": "FCECDAAA1101",
-        "mac_display": "FC:EC:DA:AA:11:01",
+        "mac": "FCECDA000001",
+        "mac_display": "FC:EC:DA:00:00:01",
         "device_id": "11111111-2222-3333-4444-555555555555",
         "hostname": "diy-key-main",
         "state_dir": "/srv/diy-key/instances/main",
@@ -43,8 +43,8 @@ class TestNames(unittest.TestCase):
                          "diy-key-instance-main.service")
 
     def test_mac_helpers(self):
-        self.assertEqual(instance_manager._mac_with_colons("FCECDAAA1101"),
-                         "FC:EC:DA:AA:11:01")
+        self.assertEqual(instance_manager._mac_with_colons("FCECDA000001"),
+                         "FC:EC:DA:00:00:01")
         mac = instance_manager._random_mac()
         self.assertEqual(len(mac), 12)
         self.assertTrue(mac.startswith("FCECDA"))
@@ -62,11 +62,11 @@ class TestBuildUnit(unittest.TestCase):
         self.assertIn("Description=AI Key emulator instance 'main' (macvlan)", unit)
         self.assertIn("WorkingDirectory=" + instance_manager.PROJECT_DIR, unit)
         self.assertIn("ip link add link enP3p49s0 name dk-main "
-                      "address FC:EC:DA:AA:11:01 type macvlan mode bridge", unit)
+                      "address FC:EC:DA:00:00:01 type macvlan mode bridge", unit)
         self.assertIn("dhclient", unit)
         self.assertIn("-cf /srv/diy-key/instances/main/dhclient.conf", unit)
         self.assertIn("--state-dir /srv/diy-key/instances/main", unit)
-        self.assertIn("--mac FCECDAAA1101", unit)
+        self.assertIn("--mac FCECDA000001", unit)
         self.assertIn("--device-id 11111111-2222-3333-4444-555555555555", unit)
         self.assertIn("EnvironmentFile=-/srv/diy-key/instances/main/diykey.env", unit)
         self.assertIn("After=network-online.target postgresql.service", unit)
@@ -215,10 +215,10 @@ class TestCreateIdentity(unittest.TestCase):
     def test_reuses_supplied_identity_and_state(self):
         state = os.path.join(self.d, "kept-state")
         e = instance_manager.create_instance("main", parent_iface="eth0",
-                                             mac="fc:ec:da:aa:11:01", device_id="dev-1",
+                                             mac="fc:ec:da:00:00:01", device_id="dev-1",
                                              state_dir=state)
-        self.assertEqual(e["mac"], "FCECDAAA1101")
-        self.assertEqual(e["mac_display"], "FC:EC:DA:AA:11:01")
+        self.assertEqual(e["mac"], "FCECDA000001")
+        self.assertEqual(e["mac_display"], "FC:EC:DA:00:00:01")
         self.assertEqual(e["device_id"], "dev-1")
         self.assertEqual(e["state_dir"], os.path.abspath(state))
         self.assertEqual(e["iface"], "dk-main")
