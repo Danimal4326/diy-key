@@ -66,8 +66,6 @@ Open items for the macOS / Protect 7.3.70 work. Newest first within each section
 
 ## Operations
 
-- launchd agent and reboot persistence (IP alias, PostgreSQL, service), like pi-port's
-  `macos_launchd.sh` (deferred: dev instance).
 - A second instance end to end (`diykey_pg_init.sh` not yet run for real).
 - 3 macOS-only errors in `tests/test_run_all.py` (MAC lookup shells out under a mocked
   `subprocess.run`).

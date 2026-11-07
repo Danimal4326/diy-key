@@ -92,8 +92,16 @@ The service refuses to start until the bind IP is on the interface, starts the i
 PostgreSQL, restarts DIY-Key if it exits, and exports the PostgreSQL socket so Protect's rotated
 database password is applied. Then click **Adopt** on the AI Key in Protect.
 
-Not yet automatic: nothing (alias, PostgreSQL, service) survives a reboot; a launchd agent is on
-the backlog.
+That run lasts as long as its terminal. To keep an instance running, across reboots too, install
+it as a root launchd daemon, which also adds the bind IP and starts PostgreSQL (as the owner of
+`pg/`, since PostgreSQL refuses root). Stop any terminal run first:
+
+```bash
+sudo DIYKEY_INSTANCE=<name> scripts/macos_launchd.sh install
+DIYKEY_INSTANCE=<name> scripts/macos_launchd.sh status
+```
+
+`touch ~/.diy-key/<name>/restart` still works without sudo; the script's header lists the rest.
 
 ## Check it works
 

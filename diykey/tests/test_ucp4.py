@@ -143,6 +143,24 @@ class TestHandleAction(_StateDirTest):
             os.environ.pop("DIYKEY_PG_SOCKET", None)
             self.assertEqual(self._call("changeUserPassword", {"username": "ui", "passwordOld": "a", "passwordNew": "b"}), {})
 
+    def test_pg_password_connects_as_cluster_owner(self):
+        # Under the root daemon psql's default role would be "root", which doesn't exist.
+        run = mock.Mock(return_value=mock.Mock(returncode=0, stderr=""))
+        with mock.patch.dict(os.environ, {"DIYKEY_PG_SOCKET": "/pg", "DIYKEY_PG_USER": "owner"}), \
+                mock.patch.object(ucp4_client.subprocess, "run", run):
+            ucp4_client._apply_pg_password("new")
+        argv = run.call_args.args[0]
+        self.assertEqual(argv[argv.index("-U") + 1], "owner")
+
+    def test_pg_password_default_role_without_owner(self):
+        run = mock.Mock(return_value=mock.Mock(returncode=0, stderr=""))
+        env = {k: v for k, v in os.environ.items() if k != "DIYKEY_PG_USER"}
+        env["DIYKEY_PG_SOCKET"] = "/pg"
+        with mock.patch.dict(os.environ, env, clear=True), \
+                mock.patch.object(ucp4_client.subprocess, "run", run):
+            ucp4_client._apply_pg_password("new")
+        self.assertNotIn("-U", run.call_args.args[0])
+
     def test_task_queue_shape(self):
         reply = self._call("getTaskQueueInfo")
         self.assertEqual(set(reply), {

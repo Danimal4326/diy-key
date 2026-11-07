@@ -9,6 +9,15 @@ REPO=$(cd "$(dirname "$0")/.." && pwd)
 # ENV_FILE, TRIGGER, LOG, PIDFILE, DEFAULT_STATE_DIR, PG_DIR and PG_LOG.
 . "$(dirname "$0")/diykey_paths.sh"
 
+# Under root (scripts/macos_launchd.sh) the instance adds its own address: an alias isn't kept
+# across reboots, and this runs at boot.
+ensure_alias() {
+    [ -n "${DIYKEY_BIND_IP:-}" ] && [ "$(id -u)" -eq 0 ] || return 0
+    ifconfig "$DIYKEY_IFACE" 2>/dev/null | grep -q "inet $DIYKEY_BIND_IP " && return 0
+    echo "diykey_service: adding $DIYKEY_BIND_IP to $DIYKEY_IFACE"
+    ifconfig "$DIYKEY_IFACE" alias "$DIYKEY_BIND_IP" 255.255.255.255
+}
+
 load_settings() {
     # Clear the previous run's settings so a removed line really goes away.
     for k in $(env | grep -E '^DIYKEY_[A-Z0-9_]*=' | cut -d= -f1); do
@@ -43,6 +52,7 @@ load_settings() {
         echo "diykey_service: $ENV_FILE is missing$missing" >&2
         return 1
     fi
+    ensure_alias
     if [ -n "${DIYKEY_BIND_IP:-}" ] && ! ifconfig "$DIYKEY_IFACE" 2>/dev/null | grep -q "inet $DIYKEY_BIND_IP "; then
         echo "diykey_service: $DIYKEY_BIND_IP is not on $DIYKEY_IFACE; add it with" \
              "sudo ifconfig $DIYKEY_IFACE alias $DIYKEY_BIND_IP 255.255.255.255" >&2
@@ -50,7 +60,15 @@ load_settings() {
     fi
 }
 
-pg_ctl() { "${DIYKEY_PG_BIN:-/opt/homebrew/opt/postgresql@17/bin}/pg_ctl" "$@"; }
+# PostgreSQL refuses to run as root: under the daemon it runs as the owner of its cluster.
+pg_ctl() {
+    local bin=${DIYKEY_PG_BIN:-/opt/homebrew/opt/postgresql@17/bin}/pg_ctl
+    if [ "$(id -u)" -eq 0 ]; then
+        sudo -u "$(stat -f %Su "$PG_DIR")" env LC_ALL=en_US.UTF-8 "$bin" "$@"
+    else
+        "$bin" "$@"
+    fi
+}
 pg_wanted() { [ "${DIYKEY_PG:-1}" != 0 ] && [ -f "$PG_DIR/PG_VERSION" ]; }
 ensure_pg() {
     pg_wanted || return 0
@@ -84,7 +102,9 @@ stop_stale() {
     # group, so it outlives the wrapper and keeps :8080.
     local old
     old=$(cat "$PIDFILE" 2>/dev/null) || return 0
-    if [ -n "$old" ] && ps -p "$old" -o command= 2>/dev/null | grep -q "run_all.py"; then
+    # This instance's only: as root a reused pid could be another service's run_all.py.
+    if [ -n "$old" ] && ps -p "$old" -o command= 2>/dev/null | grep "run_all.py" \
+            | grep -qF -- "--state-dir $DIYKEY_STATE_DIR"; then
         echo "diykey_service: stopping DIY-Key (pid $old) left running by an earlier start"
         child=$old
         stop_child
@@ -113,7 +133,14 @@ while true; do
     fi
     ensure_pg
     # changeUserPassword applies Protect's rotated password to this cluster's role.
-    if pg_wanted; then export DIYKEY_PG_SOCKET=$PG_DIR; else unset DIYKEY_PG_SOCKET; fi
+    # psql connects as the cluster's owner: under the daemon there's no "root" role.
+    if pg_wanted; then
+        export DIYKEY_PG_SOCKET=$PG_DIR
+        DIYKEY_PG_USER=$(stat -f %Su "$PG_DIR")
+        export DIYKEY_PG_USER
+    else
+        unset DIYKEY_PG_SOCKET DIYKEY_PG_USER
+    fi
     stop_stale
     seen=$(mtime "$TRIGGER")
     echo "diykey_service: starting DIY-Key '$INSTANCE' at $(date '+%F %T') (settings from $ENV_FILE)"

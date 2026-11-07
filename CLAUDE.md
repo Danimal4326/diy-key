@@ -41,6 +41,7 @@ only: no vendor code or binaries in the repo, no console modification.
 | `stage3_wss/clip_embed.py` | CLIP ViT-L/14 (OpenAI, quickgelu) image/text embeddings, tag blend |
 | `stage3_wss/nl_search.py` | Find Anything `NL_PARSE` / `IMAGE_SEARCH` replies |
 | `stage3_wss/firmware.py` | Keep the firmware Protect offers |
+| `scripts/macos_launchd.sh` | Root launchd daemon for an instance: boot start, IP alias, independent of any terminal |
 | `scripts/diykey_service.sh`, `diykey_paths.sh`, `diykey_pg_init.sh`, `diykey.env.example` | macOS per-instance service (`~/.diy-key/<instance>/`) |
 
 ## Protocol facts (Protect 7.3.70; hard to rediscover)
