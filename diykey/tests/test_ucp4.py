@@ -910,8 +910,8 @@ class TestRecognizePostVlm(_RecognizeTest):
         ram = {"cameraId": "cam1", "eventId": "ev1", "description": "a car",
                "keyMomentsTags": []}
         with mock.patch.object(ucp4_client, "_get_tagger", return_value=tagger), \
-                mock.patch.object(ucp4_client.ram_tagger, "build_result_with_images",
-                                  return_value=(ram, {})), \
+                mock.patch.object(ucp4_client.ram_tagger, "build_result",
+                                  return_value=ram), \
                 mock.patch.object(ucp4_client.vlm_describe, "describe",
                                   return_value="A man walks a dog.") as describe:
             self._run(self._body(postVLM=True), {"DIYKEY_VLM": "mlx"})
@@ -1366,39 +1366,14 @@ class TestReidEmbed(unittest.TestCase):
                             "images": [{"objectId": "o1", "reqUrl": "/internal/aiprocessors/image/i1"},
                                        {"objectId": "o2", "reqUrl": "/internal/aiprocessors/image/i2"}]}}
 
-    def test_reid_embed_is_1024_unit_from_ln_post(self):
-        import numpy as np
-        import torch
-        clip_embed = ucp4_client.clip_embed
-
-        class Visual(torch.nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.ln_post = torch.nn.Identity()
-
-        class Model:
-            visual = Visual()
-
-            def encode_image(self, x):
-                self.visual.ln_post(torch.full((1, 1024), 3.0))
-                return torch.zeros(1, 768)
-
-        pre = lambda pil: torch.zeros(3, 4, 4)  # noqa: E731
-        img = np.zeros((8, 8, 3), np.uint8)
-        with mock.patch.dict(os.environ, {"DIYKEY_CLIP": "1"}), \
-                mock.patch.object(clip_embed, "_load", return_value=(Model(), pre, None, "cpu")):
-            vec = clip_embed.reid_embed(img)
-        self.assertEqual(len(vec), 1024)
-        self.assertAlmostEqual(sum(v * v for v in vec), 1.0, places=5)
-
     def test_handler_reply_shape(self):
         post = mock.Mock(return_value=mock.Mock(status_code=200, text="{}"))
         vecs = iter([[0.1] * 1024, None])
-        with mock.patch.dict(os.environ, {"DIYKEY_CLIP": "1"}), \
+        with mock.patch.dict(os.environ, {"DIYKEY_REID_MODEL": "/m.pth"}), \
                 mock.patch.object(ucp4_client, "STATE_DIR", "/tmp/x"), \
                 mock.patch.object(ucp4_client.clip_fetch, "fetch_image", return_value="/tmp/x.jpg"), \
                 mock.patch("cv2.imread", return_value=object()), \
-                mock.patch.object(ucp4_client.clip_embed, "reid_embed", lambda _i: next(vecs)), \
+                mock.patch.object(ucp4_client.reid_model, "embed", lambda _i: next(vecs)), \
                 mock.patch.object(ucp4_client.requests, "post", post):
             ucp4_client._handle_generate_embeddings("10.0.0.5", "fcecdaaabbcc", self._task())
         body = post.call_args.kwargs["json"]

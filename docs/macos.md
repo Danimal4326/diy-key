@@ -79,6 +79,8 @@ restart           touch to restart DIY-Key
 | `DIYKEY_FACE_MODELS` | Folder holding the YuNet and SFace `.onnx` files (default `<diykey>/models`) |
 | `DIYKEY_FACE_ENHANCE_MODEL` | GFPGAN v1.4 ONNX for face enhancement; unset = the original face is uploaded |
 | `DIYKEY_LPR_THRESH`, `DIYKEY_LPR_MIN_PX` | Plate-detector score floor (default 0.5) and minimum plate width in pixels (60) |
+| `DIYKEY_FACE_MIN_PX` | Narrowest face sent to Protect, in frame pixels (default 40, 0 keeps all) |
+| `DIYKEY_REID_MODEL` | OSNet-AIN x1.0 MSMT17 checkpoint: person re-ID vectors and tap-to-find |
 | `DIYKEY_TASK_WORKERS`, `DIYKEY_TASK_QUEUE_MAX`, `DIYKEY_TASK_DROP_AGE_S` | Task pool: workers (default 1), max queued (200; full = drop), max wait before discard (900 s) |
 | `DIYKEY_RAM_TAGS` | Path to Protect's `ram_tags.csv` (query tags; otherwise a built-in list of names checked against it) |
 | `DIYKEY_NL_SEARCH` | `0` to not open the nl-search connection (default on) |

@@ -6,6 +6,14 @@ recognizeKeyFrames (and reverification) hand us a console-relative reqUrl,
 same export as plain MP4 when asked for ``format=mp4``, which ffmpeg reads; the
 fetch authenticates like the result callbacks (our client cert + x-ident).
 
+The export does not start exactly at the request's ``start``: live 2026-11-08 07:54 on
+Backyard the 31.3 s window came back as a 35.5 s clip, and frames seeked from ``start`` were
+4-5 s early by the camera's OSD clock (the face crops held a deck railing). The firmware takes
+the clip's real start from the ``x-start-timestamp`` response header (syswrapper.sh 2.2.8
+~2590 "modify start by x-start-timestamp"), so fetch_clip saves it next to the clip as
+``<event>.mp4.start`` and extract_frames seeks from it. Without the header the clip is taken
+to end at the request's ``end`` (start = end - duration).
+
 Clips land in ``<state>/clips/<event>.mp4`` with key-moment JPEGs in
 ``<state>/clips/<event>/<ts>.jpg``; only the newest KEEP_EVENTS are kept.
 """
@@ -16,6 +24,7 @@ import shutil
 import subprocess
 
 import requests
+from urllib.parse import parse_qsl, urlsplit
 
 log = logging.getLogger("diykey.clips")
 
@@ -46,6 +55,7 @@ def fetch_clip(url, headers, cert, clips_dir, event_id):
             with open(tmp, "wb") as f:
                 for chunk in resp.iter_content(1 << 16):
                     f.write(chunk)
+            hdr_start = resp.headers.get("x-start-timestamp") or resp.headers.get("x-timestamp")
         os.replace(tmp, path)
     except (requests.RequestException, OSError) as e:
         log.warning("clip fetch %s failed: %r", url, e)
@@ -54,8 +64,49 @@ def fetch_clip(url, headers, cert, clips_dir, event_id):
         except OSError:
             pass
         return None
-    log.info("clip for event %s: %s (%d bytes)", event_id, path, os.path.getsize(path))
+    real, how = clip_start(url, hdr_start, path)
+    if real is not None:
+        with open(path + ".start", "w") as f:
+            f.write(str(real))
+    log.info("clip for event %s: %s (%d bytes), starts %s (%s)", event_id, path,
+             os.path.getsize(path), real, how)
     return path
+
+
+def _probe_duration_ms(clip_path, ffprobe="ffprobe"):
+    try:
+        r = subprocess.run([ffprobe, "-v", "error", "-show_entries", "format=duration",
+                            "-of", "csv=p=0", clip_path], capture_output=True, text=True, timeout=30)
+        return int(float(r.stdout.strip()) * 1000)
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+
+
+def clip_start(url, header_value, clip_path, probe=_probe_duration_ms):
+    """(real clip start in epoch ms, source) from the response header, else end - duration."""
+    try:
+        if header_value and int(header_value) > 0:
+            return int(header_value), "x-start-timestamp"
+    except ValueError:
+        pass
+    q = dict(parse_qsl(urlsplit(url).query))
+    try:
+        start, end = int(q["start"]), int(q["end"])
+    except (KeyError, ValueError):
+        return None, "unknown"
+    dur = probe(clip_path)
+    if not dur or dur <= end - start:
+        return start, "request start"
+    return end - dur, "end - duration"
+
+
+def real_start(clip_path, start_ms):
+    """The clip's saved real start, else the caller's start."""
+    try:
+        with open(clip_path + ".start") as f:
+            return int(f.read().strip())
+    except (OSError, ValueError):
+        return start_ms
 
 
 def extract_frames(clip_path, start_ms, moments_ms, ffmpeg="ffmpeg"):
@@ -63,6 +114,7 @@ def extract_frames(clip_path, start_ms, moments_ms, ffmpeg="ffmpeg"):
     Returns {moment_ms: jpeg_path} for the frames that came out."""
     out_dir = os.path.splitext(clip_path)[0]
     os.makedirs(out_dir, exist_ok=True)
+    start_ms = real_start(clip_path, start_ms)
     frames = {}
     for ts in moments_ms:
         offset = max(0.0, (int(ts) - int(start_ms)) / 1000.0)
@@ -91,6 +143,8 @@ def prune(clips_dir, keep=KEEP_EVENTS):
     for e in clips[keep:]:
         try:
             os.remove(e.path)
+            if os.path.exists(e.path + ".start"):
+                os.remove(e.path + ".start")
             shutil.rmtree(os.path.splitext(e.path)[0], ignore_errors=True)
         except OSError as err:
             log.warning("could not prune %s: %r", e.path, err)

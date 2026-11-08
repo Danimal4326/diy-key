@@ -72,52 +72,6 @@ def image_embed(img_bgr):
     return _unit(feats.float().cpu().numpy())
 
 
-REID_DIM = 1024
-REID_MODEL = "diykey-clip-vitl14-pool"
-
-
-def reid_embed(img_bgr):
-    """1024 floats, unit length, for a person crop (BGR), or None. Protect's generate-embeddings
-    reply wants a 1024-d `reidEmbed` per person (M/315148:83 length(1024); M/761379:380-400;
-    stored as ramDetections.reidEmbedding and grouped by M/186873 matchSession). It only ever
-    compares these with each other (cosine), so any consistent 1024-d space works, though this is
-    NOT the firmware's OSNet-style model: it is ViT-L/14's pooled token BEFORE the final
-    projection (visual.ln_post output, 1024 wide; the 768-d image_embed is that times `proj`).
-    reidCutoffDefault (0.75, M/186873:48-51) was calibrated for the firmware model; Protect does
-    not send the cutoff in the task, so it cannot be logged here, and CLIP similarities between
-    different people on one camera may sit above it (strangers merged) -- tune
-    deepUnderstandingSettings.reidCutoffDefault/ByCamera if so. Reuses the loaded CLIP model.
-
-    Firmware reference (aikey-fw 2.2.8 ui-reid-agent agent.py + trt_engine.py): the real agent
-    has no generate-embeddings route (it serves /segment, /segment-video, /search-reranking, which
-    reranks with cosine distance 1 - dot, so its vectors are unit); its encoder resizes a person
-    crop to 128x384 (OSNet) and returns the engine output unnormalised. We keep CLIP's own
-    224 preprocessing because the ViT was trained on it."""
-    if not enabled() or img_bgr is None or img_bgr.size == 0:
-        return None
-    loaded = _load()
-    if not loaded:
-        return None
-    model, preprocess, _, device = loaded
-    import torch
-    from PIL import Image
-    pil = Image.fromarray(cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB))
-    grabbed = []
-    hook = model.visual.ln_post.register_forward_hook(lambda _m, _i, out: grabbed.append(out))
-    try:
-        with _lock, torch.no_grad():
-            model.encode_image(preprocess(pil).unsqueeze(0).to(device))
-    finally:
-        hook.remove()
-    if not grabbed:
-        return None
-    pooled = grabbed[-1].float().cpu().numpy()
-    if pooled.ndim == 3:  # older open_clip applies ln_post to every token; CLS is first
-        pooled = pooled[:, 0]
-    vec = pooled.reshape(-1)
-    return _unit(vec) if vec.size == REID_DIM else None
-
-
 def text_embed(text):
     """768 floats for a search phrase, prefixed like the AI Key's encoder; or None."""
     if not enabled():
