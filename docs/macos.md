@@ -70,15 +70,29 @@ restart           touch to restart DIY-Key
 | `DIYKEY_IFACE`, `DIYKEY_MAC`, `DIYKEY_DEVICE_ID`, `DIYKEY_GUID`, `DIYKEY_HOSTNAME` | Identity (required except hostname) |
 | `DIYKEY_BIND_IP` | The instance's own address: listeners, outbound ucp4 and nl-search, PostgreSQL |
 | `DIYKEY_CONSOLE_HOST` | Console address (tokenless reconnect, PostgreSQL access rule) |
-| `DIYKEY_RAM_MODEL` | COCO ONNX detector for tags, verification and crops; unset = placeholder results |
+| `DIYKEY_RAM_MODEL` | COCO ONNX detector for tags, verification and crops; also advertises Recognize Anything and retroactive processing. Unset = no RAM result |
 | `DIYKEY_CLIP=1` | CLIP ViT-L/14 embeddings: per-object rows for search, query embeddings |
-| `DIYKEY_RAM_TAGS` | Path to Protect's `ram_tags.csv` (query tags; a small built-in list otherwise) |
+| `DIYKEY_FACE`, `DIYKEY_LPR`, `DIYKEY_FACE_ENHANCE` | `1` to advertise face recognition, licence plates, face enhancement (default off) |
+| `DIYKEY_VLM` | AI summary backend, `mlx` or `transformers`; unset, `off` or `0` = not advertised |
+| `DIYKEY_VLM_MODEL` | AI summary model: an mlx-community repo (`mlx`) or a local InternVL2-style checkpoint path (`transformers`) |
+| `DIYKEY_DEEP_MODE` | `1` (with `DIYKEY_VLM`) advertises `supportDeepMode`/`supportVlm`. Protect then sends `modelMode: deep` when Deep Understanding is on for the NVR, turns RAM off on this key, and dispatches `RequestAI :7968/describe`; the key replies with a VLM description of a representative frame, `labels` from the RAM tagger if `DIYKEY_RAM_MODEL` is set, and (with `DIYKEY_CLIP=1` and `DIYKEY_DESC_EMBED=1`) a CLIP text embedding. `getInfo` reports `aiMode: deep` only when this is on. Person re-ID needs a 1024-d re-ID model (CLIP is 768-d), so `:7445/generate-embeddings` tasks are answered as failed |
+| `DIYKEY_FACE_MODELS` | Folder holding the YuNet and SFace `.onnx` files (default `<diykey>/models`) |
+| `DIYKEY_FACE_ENHANCE_MODEL` | GFPGAN v1.4 ONNX for face enhancement; unset = the original face is uploaded |
+| `DIYKEY_LPR_THRESH`, `DIYKEY_LPR_MIN_PX` | Plate-detector score floor (default 0.5) and minimum plate width in pixels (60) |
+| `DIYKEY_TASK_WORKERS`, `DIYKEY_TASK_QUEUE_MAX`, `DIYKEY_TASK_DROP_AGE_S` | Task pool: workers (default 1), max queued (200; full = drop), max wait before discard (900 s) |
+| `DIYKEY_RAM_TAGS` | Path to Protect's `ram_tags.csv` (query tags; otherwise a built-in list of names checked against it) |
 | `DIYKEY_NL_SEARCH` | `0` to not open the nl-search connection (default on) |
-| `DIYKEY_CLIP_TAG_BLEND` | Weight of the tag text blended into stored embeddings (default 0.1, 0 = off) |
+| `DIYKEY_CLIP_TAG_BLEND` | Weight of the tag text blended into stored embeddings (default 0.1, 0 = off). The same vector feeds search and AI Key Advanced alarm scores: higher = more alarms fire on crops matching their tags, but wrong tags inflate scores too |
 | `DIYKEY_FW_VERSION`, `DIYKEY_DISCOVERY_FW_VERSION` | Factory firmware; a simulated update pins newer in `state/fw_version.json` |
 | `DIYKEY_FW_DIR`, `DIYKEY_FW_DOWNLOAD`, `DIYKEY_FAKE_UPDATE_S` | Where offered firmware is kept (default `~/.diy-key/firmware`), whether, and how long the fake install takes |
 | `DIYKEY_PG`, `DIYKEY_PG_BIN` | `0` to run without the instance's PostgreSQL; Homebrew `postgresql@17` bin dir |
 | `DIYKEY_DEBUG`, `DIYKEY_LOG_MAX_MB`, `DIYKEY_LOG_KEEP` | Logging |
+
+AI Key Advanced alarms (Alarm Manager rules with a natural-language sentence and a threshold) need
+`DIYKEY_CLIP=1`, `DIYKEY_RAM_MODEL`, `DIYKEY_RAM_TAGS` and the nl-search connection; startup logs
+one warning naming whatever is missing. Protect parses a rule's sentence once (at first use) and
+caches the result (tags and text embedding) on the rule; a rule saved while these were missing may
+keep an empty tag list and never fire, so recreate it after fixing them.
 
 ## Run
 

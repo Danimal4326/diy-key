@@ -12,7 +12,8 @@ sends every Find Anything query there instead of to a console AI Controller:
 
 and then queries the AI Key's ramDetections: tag ids for keyTags, cosine distance
 for txtEmbed/imgEmbed. Tags come from Protect's RAM vocabulary (DIYKEY_RAM_TAGS:
-path to Protect's app/fixtures/ram_tags.csv; a small built-in list otherwise).
+path to Protect's app/fixtures/ram_tags.csv; FALLBACK_VOCAB, names checked against it,
+otherwise).
 Embeddings are clip_embed's CLIP ViT-L/14, the space DIY-Key stores images in.
 """
 import datetime
@@ -38,6 +39,49 @@ OBJECT_WORDS = {
 }
 STOP = {"a", "an", "the", "of", "in", "on", "at", "with", "and", "or", "to", "by", "near",
         "show", "me", "find", "any", "some", "is", "are", "was", "who", "that", "wearing"}
+# Query word -> the RAM tag Protect knows it by. Protect turns keyTags[].tags into ids with
+# store.ramTagBidirectionalMap.get(name) and drops every miss (M/253677_aiprocessors.js:26-29);
+# that map holds only the fixture's enabled=true rows, by exact lowercase name
+# (M/499374_store.js:56-60, `SELECT id,name FROM "ramTags" WHERE enabled=true`). Fixture
+# (up/app/fixtures/ram_tags.csv) has no "people", "kid", "bike", "pickup", "human" or "grey",
+# but has person/child/bicycle/truck/gray.
+ALIASES = {
+    "people": "person", "someone": "person", "human": "person", "humans": "person",
+    "men": "man", "women": "woman", "kid": "child", "kids": "child", "children": "child",
+    "boys": "boy", "girls": "girl", "pedestrians": "pedestrian",
+    "cars": "car", "trucks": "truck", "vehicles": "vehicle", "pickup": "truck", "bike": "bicycle",
+    "bikes": "bicycle", "bicycles": "bicycle", "motorcycles": "motorcycle", "vans": "van",
+    "buses": "bus", "trailers": "trailer",
+    "dogs": "dog", "cats": "cat", "animals": "animal", "birds": "bird", "horses": "horse",
+    "squirrels": "squirrel", "foxes": "fox", "bears": "bear",
+    "grey": "gray",
+}
+# Without DIYKEY_RAM_TAGS: only names checked against the fixture's enabled=true rows
+# (2026-11-07, ram_tags.csv from Protect 7.3.70; tests.test_nl_search re-checks when the
+# fixture is present). The old fallback also offered "grey", which Protect drops: a rule
+# "grey car" then still fired on "car", but "grey" alone stored ramTagIds=[] -- and once
+# embedding and ramTagIds are set (even []) the rule is never re-parsed (M/253677:19-22), so
+# it could never fire until edited.
+FALLBACK_VOCAB = frozenset({
+    # Protect object types and what ram_tagger puts on their crops (ram_tagger.FAMILY,
+    # COCO_TO_RAM, the camera's vehicleType values in lpr.py)
+    "person", "man", "woman", "child", "boy", "girl", "pedestrian",
+    "vehicle", "car", "truck", "bus", "van", "suv", "sedan", "trailer", "motorcycle", "motorbike",
+    "bicycle", "train", "boat", "plane", "police car",
+    "animal", "dog", "cat", "bird", "horse", "sheep", "cow", "elephant", "bear", "zebra",
+    "giraffe", "deer", "fox", "raccoon", "squirrel",
+    "backpack", "umbrella", "handbag", "luggage", "package",
+    # scene
+    "night", "driveway", "yard",
+    # colours (ram_tagger.COLOURS minus "grey")
+    "white", "black", "gray", "silver", "red", "blue", "green", "yellow", "orange", "brown",
+    "purple", "pink", "beige", "gold",
+})
+# Object type -> the umbrella RAM tag ram_tagger.thumbnail_tags puts on every crop of it, so a
+# query naming any object of that type shares a tag id with the object row; Protect's alarm
+# matching returns false without that overlap before it looks at the embedding
+# (M/718745_aiprocessors.js:23,33).
+UMBRELLA = {"person": "person", "vehicle": "vehicle", "animal": "animal"}
 _vocab = None
 
 
@@ -56,13 +100,27 @@ def vocabulary():
         except OSError:
             pass
         if not names:
-            names = {t for t in ram_tagger.COCO_TO_RAM.values() if t}
-            names |= {"person", "car", "truck", "bus", "dog", "cat", "bicycle", "motorcycle",
-                      "night", "man", "woman", "suv", "van", "trailer", "driveway", "yard"}
-            names |= ram_tagger.COLOURS
-        log.info("nl-search vocabulary: %d tags%s", len(names), f" from {path}" if path else "")
+            names = set(FALLBACK_VOCAB)
+        log.info("nl-search vocabulary: %d tags%s", len(names), f" from {path}" if path else
+                 " (built-in; set DIYKEY_RAM_TAGS to Protect's ram_tags.csv)")
         _vocab = names
     return _vocab
+
+
+def _object_type(word):
+    for t, ws in OBJECT_WORDS.items():
+        if word in ws or ALIASES.get(word, word) in ws:
+            return t
+    return None
+
+
+def _detectable(object_type):
+    """Tags ram_tagger can put on a crop of this object type (besides the umbrella)."""
+    labels = ram_tagger.FAMILY.get(object_type, ())
+    # Detector labels only: "suv"/"van" come from the camera's vehicleType, which most crops
+    # lack (the detector calls them "car"), so those queries also carry "vehicle".
+    tags = {ram_tagger.COCO_TO_RAM.get(lbl, lbl) for lbl in labels} - {None}
+    return tags | {UMBRELLA[object_type]}
 
 
 def _time_range(text, now=None):
@@ -92,7 +150,10 @@ def _time_range(text, now=None):
 
 
 def parse(query, now=None):
-    """NL_PARSE reply for a query sentence."""
+    """NL_PARSE reply for a query sentence. Every name in keyTags[].tags is in vocabulary(), and
+    a query that names an object (person, car, dog, ...) always carries a tag ram_tagger puts on
+    such objects: an alarm rule stores these as ramTagIds once and for all (M/253677:19-45), and
+    matches an object only when its tag ids overlap them (M/718745:23,33)."""
     text = " ".join(query.lower().split())
     vocab = vocabulary()
     start, end, phrase = _time_range(text, now)
@@ -102,13 +163,35 @@ def parse(query, now=None):
     for size in (3, 2, 1):  # longest vocabulary phrase first ("police car" over "car")
         for i in range(len(words) - size + 1):
             gram = " ".join(words[i:i + size])
-            if gram in seen or (size == 1 and gram in STOP) or gram not in vocab:
+            tag = ALIASES.get(gram, gram) if size == 1 else gram
+            if gram in seen or (size == 1 and gram in STOP) or tag not in vocab:
                 continue
-            if any(gram in s for s in seen):
+            if any(f" {gram} " in f" {s} " for s in seen):  # inside a longer match
                 continue
             seen.add(gram)
-            key_tags.append({"matchedWord": gram, "tags": [gram]})
-    object_types = [t for t, ws in OBJECT_WORDS.items() if any(w in ws for w in words)]
+            key_tags.append({"matchedWord": gram, "tags": [tag]})
+    object_types = [t for t in OBJECT_WORDS if any(_object_type(w) == t for w in words)]
+    bare = retrieval.strip()
+    exact = (len(words) == 1 and _object_type(bare) is not None
+             and ALIASES.get(bare, bare) in vocab)
+    for w in words:
+        t = _object_type(w)
+        if t is None:
+            continue
+        canon = ALIASES.get(w, w)
+        want = [canon] if canon in vocab else []
+        # Exact mode fires on its one label's confidence (M/718745:18-28): keep "car" from also
+        # matching trucks via "vehicle" unless ram_tagger never says "car"-level words for it
+        # ("man", "deer", "suv" crops are tagged person/animal/vehicle).
+        if not exact or canon not in _detectable(t):
+            want.append(UMBRELLA[t])
+        want = [x for x in want if x in vocab]
+        entry = next((k for k in key_tags if w in k["matchedWord"].split()), None)
+        if entry is None:
+            if want:
+                key_tags.append({"matchedWord": w, "tags": want})
+        else:
+            entry["tags"] += [x for x in want if x not in entry["tags"]]
     reply = {"keyTags": key_tags, "objectTypes": object_types,
              "txtEmbed": clip_embed.text_embed(retrieval or text) or [],
              "model": clip_embed.MODEL_NAME, "dim": clip_embed.DIM}
@@ -116,11 +199,12 @@ def parse(query, now=None):
         reply.update(startTime=start, endTime=end, timeTag=phrase)
     if not key_tags:
         reply["exact_match"] = start is not None  # a pure time query lists everything in it
+        log.info("NL_PARSE %r: no RAM tags -- fine for search, but an alarm rule with this "
+                 "sentence stores ramTagIds=[] and can never fire", query)
     elif len(key_tags) == 1:
         # Protect's exact mode searches by object label and returns nothing without one, so only
         # a bare object word ("car", "person") is exact; "night", "grey car" go to vector/hybrid.
-        bare = retrieval.strip()
-        reply["exact_match"] = bare in vocab and any(bare in ws for ws in OBJECT_WORDS.values())
+        reply["exact_match"] = exact
     return reply
 
 

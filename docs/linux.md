@@ -57,6 +57,16 @@ DIYKEY_RAM_MODEL=/root/models/yolov9-s-320.onnx
 # DIYKEY_NL_SEARCH=1
 # DIYKEY_RAM_TAGS=/root/up/app/fixtures/ram_tags.csv
 # DIYKEY_FW_DIR=/root/diy-key-firmware
+# Features advertised to Protect; each is off unless set here.
+# DIYKEY_FACE=1          # face recognition
+# DIYKEY_FACE_MODELS=/path/to/models
+# DIYKEY_LPR=1           # licence plate recognition
+# DIYKEY_FACE_ENHANCE=1  # face enhancement
+# DIYKEY_FACE_ENHANCE_MODEL=/path/to/gfpgan_1.4.onnx
+# DIYKEY_VLM=mlx         # AI summary: mlx (macOS only) or transformers; off/0 or unset = off
+# DIYKEY_VLM_MODEL=mlx-community/<SmolVLM2 or Qwen3-VL-2B repo>
+# DIYKEY_TASK_WORKERS=1
+# DIYKEY_TASK_QUEUE_MAX=200
 EOF
 sudo systemctl restart diy-key-instance-main
 ```
@@ -64,7 +74,8 @@ sudo systemctl restart diy-key-instance-main
 `EnvironmentFile` is `-`-prefixed, so a missing file does not stop the unit. Identity and
 network stay in the unit (macvlan MAC, `--state-dir`); the env file is for the AI settings
 only. `DIYKEY_FW_VERSION` / `DIYKEY_DISCOVERY_FW_VERSION` also work there if you want to pin a
-factory version without touching `diykey.cfg`.
+factory version without touching `diykey.cfg`. The full list of keys is in
+`scripts/diykey.env.example`.
 
 ## Verify
 
