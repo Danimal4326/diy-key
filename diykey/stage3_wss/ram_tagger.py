@@ -29,6 +29,17 @@ COCO_TO_RAM = {
     "scissors": None, "hair drier": None,
 }
 NIGHT_TAG = "night"
+# Camera attribute values -> the fixture's name. Protect drops a thumbnail tag that is not an
+# enabled ram_tags.csv row ("Some tags are not found in ramTagBidirectionalMap",
+# M/12387_aiprocessors.js:181); the fixture has "gray" and "bicycle" but no "grey"/"bike"
+# (lpr.py's vehicleType list includes "bike").
+ATTR_TO_RAM = {"grey": "gray", "bike": "bicycle"}
+# Protect object type -> the tag every one of its crops carries in thumbnailTags. Those tags are
+# the object row's ramTagIds, and an alarm rule only matches a row sharing a tag id with it
+# (M/718745_aiprocessors.js:23,33); nl_search.parse adds the same umbrella tag to queries naming
+# an object of that type, so a "suv" or "deer" rule can still match a crop the detector called
+# "car" or nothing at all.
+UMBRELLA = {"person": "person", "vehicle": "vehicle", "animal": "animal"}
 
 
 class RamTagger:
@@ -110,7 +121,8 @@ def tag_crop(tagger, img_bgr, hint):
         val = (attrs.get(key) or {}).get("val")
         if val:
             conf = round(min(1.0, (attrs[key].get("confidence") or 0) / 100), 3)
-            found[str(val)] = max(found.get(str(val), 0), conf)
+            tag = ATTR_TO_RAM.get(str(val).lower(), str(val).lower())
+            found[tag] = max(found.get(tag, 0), conf)
     if object_type and object_type not in ("vehicle",) and object_type not in found:
         found[object_type] = round((hint.get("confidence") or 0) / 100, 3)
     return [{"tag": t, "confScore": c} for t, c in sorted(found.items(), key=lambda kv: -kv[1])]
@@ -161,19 +173,70 @@ def thumbnail_tags(tagger, objects):
     for o in objects:
         if o.get("img") is None:
             continue
+        hint = o.get("hint") or {}
         entry = {"trackerID": int(o["trackerID"]), "keyMomentMs": int(o["keyMomentMs"]),
-                 "tags": tag_crop(tagger, o["img"], o.get("hint") or {})}
+                 "tags": tag_crop(tagger, o["img"], hint)}
+        # Blend before the umbrella tag: DIYKEY_CLIP_TAG_BLEND was tuned on "a photo of car,
+        # night", not "car, night, vehicle".
         emb = clip_embed.blend(clip_embed.image_embed(o["img"]), [t["tag"] for t in entry["tags"]])
         if emb:
             entry["imgEmbed"] = emb
+        umbrella = UMBRELLA.get(str(hint.get("objectType") or (hint.get("attributes") or {})
+                                    .get("objectType") or "").lower())
+        if umbrella and all(t["tag"] != umbrella for t in entry["tags"]):
+            entry["tags"].append({"tag": umbrella,
+                                  "confScore": round((hint.get("confidence") or 50) / 100, 3)})
         out.append(entry)
     return out
+
+
+SNAPSHOT_TYPES = {"person", "vehicle", "animal", "face", "licensePlate"}
+
+
+def _roi_list(roi_meta, ms):
+    """The roi entries of roiMeta items with ts == ms; a roi is one dict or a list of them (the
+    firmware's jq `select(.ts == $km) | .roi` passes either through, SW:2737-2760)."""
+    out = []
+    for item in roi_meta or ():
+        if item.get("ts") != ms:
+            continue
+        roi = item.get("roi")
+        out.extend(r for r in (roi if isinstance(roi, list) else [roi]) if isinstance(r, dict))
+    return out
+
+
+def _snapshot_type(roi):
+    for v in ((roi.get("attributes") or {}).get("objectType"), roi.get("objectType")):
+        if v in SNAPSHOT_TYPES:
+            return v
+    return None
 
 
 def build_result(tagger, camera_id, event_id, frames, pre_ms=0, hints=None, objects=None):
     """recognizeKeyFrames result (ramInferenceSchema) from {moment_ms: jpeg_path}; hints maps
     moment_ms -> the image entry when the frame is a crop of one object (image tasks)."""
+    return _build(tagger, camera_id, event_id, frames, pre_ms, hints, objects)[0]
+
+
+def build_result_with_images(tagger, camera_id, event_id, frames, pre_ms=0, hints=None,
+                             objects=None, roi_meta=None):
+    """-> (result, {str(trackerID): jpeg bytes}). Like build_result, plus what the firmware adds
+    when the request carries roiMeta (SW:2737-2760): keyMomentsTags[].tagObjs (that key
+    moment's roi list, verbatim) and keyMomentsTags[].searchSnapshots (one snapshotSchema per
+    roi with a trackerId and a person/vehicle/animal type). Upload each JPEG as multipart part
+    named str(trackerID) next to the `ram` JSON part (SW:4062-4070 keys parts by trackerID,
+    the same way it does for face/lpr). Protect keys the thumbnail map on
+    [trackerID, clockBestWall] (M/499374:23-31) and saves one thumbnail per searchSnapshots
+    entry from the part body (M/12387:244-262), so clockBestWall == keyMomentMs, which is also
+    what thumbnailTags match on. tagObjs is NOT in ramInferenceSchema (M/315148:75; zod drops
+    it), so it is firmware parity only; searchSnapshots is what Protect reads. The JPEG is the
+    roi's crop of the frame, or the whole frame when the box is unusable."""
+    return _build(tagger, camera_id, event_id, frames, pre_ms, hints, objects, roi_meta)
+
+
+def _build(tagger, camera_id, event_id, frames, pre_ms, hints, objects, roi_meta=None):
     t0 = time.monotonic()
+    images = {}
     key_moments, merged = [], {}
     for ms in sorted(frames):
         img = cv2.imread(frames[ms])
@@ -182,13 +245,34 @@ def build_result(tagger, camera_id, event_id, frames, pre_ms=0, hints=None, obje
             continue
         hint = (hints or {}).get(ms)
         tags = tag_crop(tagger, img, hint) if hint else tagger.tag_frame(img)
-        key_moments.append({"keyMomentMs": int(ms), "tags": tags})
+        km = {"keyMomentMs": int(ms), "tags": tags}
+        rois = _roi_list(roi_meta, ms)
+        if rois:
+            km["tagObjs"] = rois
+            snaps = []
+            for roi in rois:
+                typ, tid = _snapshot_type(roi), roi.get("trackerId", roi.get("trackerID"))
+                if typ is None or not isinstance(tid, int) or str(tid) in images:
+                    continue
+                crop = crop_box(img, roi["coord"]) if len(roi.get("coord") or ()) >= 4 else None
+                ok, buf = cv2.imencode(".jpg", img if crop is None else crop)
+                if not ok:
+                    continue
+                images[str(tid)] = buf.tobytes()
+                snaps.append({"clockBestMonotonic": int(ms), "clockBestWall": int(ms),
+                              "smartDetectHeatmap": "",
+                              "smartDetectSnapshot": f"/tmp/{camera_id}_{tid}.jpg",
+                              "smartDetectSnapshotName": "", "smartDetectSnapshotType": typ,
+                              "trackerID": tid})
+            if snaps:
+                km["searchSnapshots"] = snaps
+        key_moments.append(km)
         for t in tags:
             merged[t["tag"]] = max(merged.get(t["tag"], 0), t["confScore"])
     thumbs = thumbnail_tags(tagger, objects or [])
     infer_ms = int((time.monotonic() - t0) * 1000)
     all_tags = [{"tag": t, "confScore": s} for t, s in sorted(merged.items(), key=lambda kv: -kv[1])]
-    return {
+    return ({
         "cameraId": camera_id,
         "eventId": event_id,
         "status": "success",
@@ -200,4 +284,4 @@ def build_result(tagger, camera_id, event_id, frames, pre_ms=0, hints=None, obje
         "inferTxtMs": 0,
         "preProcessMs": int(pre_ms),
         "timeElapsedMs": int(pre_ms) + infer_ms,
-    }
+    }, images)

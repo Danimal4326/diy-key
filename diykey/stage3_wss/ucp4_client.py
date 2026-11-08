@@ -20,6 +20,7 @@ import argparse
 import json
 import logging
 import os
+import queue
 import re
 import shutil
 import ssl
@@ -48,6 +49,10 @@ import ram_tagger  # noqa: E402
 import nl_search  # noqa: E402
 import clip_embed  # noqa: E402
 import second_verifier  # noqa: E402
+import face_recog  # noqa: E402
+import lpr  # noqa: E402
+import face_enhance  # noqa: E402
+import vlm_describe  # noqa: E402
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -64,16 +69,89 @@ RECORD_FORMAT_RAW = 3
 # --state-dir (or None for the historical stage1_http/ path). Resolved in
 # main(); kept as plain paths here so importing this module has no side effects.
 STATE_DIR = None
+PROCESS_START = time.time()  # getInfo "uptime" counts from here
 
 # What a real AI Key advertises in getInfo featureFlags (Protect's aiprocessor model lists
-# them); the UI enables features, e.g. person second-stage verification, from these.
-_FEATURE = {"enabled": True, "version": "v1"}
-FEATURE_FLAGS = {k: dict(_FEATURE) for k in (
-    "supportPoseEstimation", "supportPersonReId", "supportFaceEnhancement",
-    "supportRetroactiveProcessing", "supportImageSearch", "supportRecognizeAnything",
-    "supportFaceRecognition", "supportLicensePlateRecognition")}
+# them); the UI enables features, e.g. person second-stage verification, from these. Built
+# from the environment at each getInfo so they say what this instance can actually do.
+# Leaving a flag out is not "off": for an AI Key Protect fills an absent
+# supportFaceRecognition/LicensePlateRecognition/AiSummary/RecognizeAnything/FaceEnhancement
+# (and RetroactiveProcessing from fw 1.3.9) with enabled=true (Protect M/643837:52-67), so an
+# unsupported feature is sent explicitly as {"enabled": false}.
+_OFF_VALUES = ("", "0", "off", "false", "no")
+
+
+def _truthy(value):
+    return (value or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _feature(enabled):
+    return {"enabled": bool(enabled), "version": "v1"}
+
+
+def _deep_flags(env, vlm):
+    on = vlm and _truthy(env.get("DIYKEY_DEEP_MODE"))
+    return {"supportDeepMode": on, "supportVlm": on}
+
+
+def _feature_flags(env=None):
+    """featureFlags for getInfo (aiMode added by the caller). Every capability defaults to
+    off unless its DIYKEY_* key enables it."""
+    env = os.environ if env is None else env
+    ram = bool((env.get("DIYKEY_RAM_MODEL") or "").strip())
+    # Only the backends vlm_describe implements; any other value would advertise a summary
+    # that never arrives.
+    vlm = (env.get("DIYKEY_VLM") or "").strip().lower() in ("mlx", "transformers")
+    return {
+        # Unchanged from the always-on list this replaced.
+        "supportPoseEstimation": _feature(True),
+        # Gates the Person class in Second Stage Verification: Protect builds the NVR's in-memory
+        # aiFeatureFlag.supportPersonReId from adopted AI Keys' getInfo (live 2026-10-29 on
+        # Saul: Person unselectable until advertised, then a browser reload). Live 2026-11-07
+        # (Protect 7.3.74): turning it off hid Person again. No ReID model is needed for SSV
+        # itself; DIYKEY_PERSON_REID=0 turns it off.
+        "supportPersonReId": _feature((env.get("DIYKEY_PERSON_REID") or "1").strip().lower()
+                                      not in _OFF_VALUES),
+        "supportFaceEnhancement": _feature(_truthy(env.get("DIYKEY_FACE_ENHANCE"))),
+        "supportRetroactiveProcessing": _feature(ram),
+        "supportImageSearch": _feature(_truthy(env.get("DIYKEY_CLIP"))),
+        "supportRecognizeAnything": _feature(ram),
+        "supportFaceRecognition": _feature(_truthy(env.get("DIYKEY_FACE"))),
+        "supportLicensePlateRecognition": _feature(_truthy(env.get("DIYKEY_LPR"))),
+        "supportAiSummary": _feature(vlm),
+        # Deep Understanding (Protect M/59223:106-117, M/643837:69-72: plain booleans, absent
+        # reads false; supportVlm is the legacy alias, kept in sync). isDeepModeCapable
+        # (M/387031:24) is what lets Protect send modelMode "deep" and, once the NVR's deepUnderstandingSettings
+        # are on, RAM is switched off on this key (M/288811:12-14, M/851272:119) and the
+        # work arrives as RequestAI :7968/describe instead. So it is opt-in
+        # (DIYKEY_DEEP_MODE=1) and needs a working VLM: advertising it without one would trade
+        # working recognizeKeyFrames for descriptions that never come.
+        **_deep_flags(env, vlm),
+        # fastReverification (Second Stage Verification from per-thumbnail JPEGs instead of a
+        # clip) runs second_verifier, which needs the detector DIYKEY_RAM_MODEL loads. The
+        # firmware advertises it (aikey-fw 2.2.8 ai-key-base-file featureflags.json); Protect
+        # 7.3.70 has no such attribute (M/59223) so this only matters on a newer Protect.
+        "supportReverification": _feature(ram),
+        # The firmware's own description: "AI Key presents its TLS client certificate on
+        # outbound Protect internal aiprocessors API requests". Protect only uses it to refuse
+        # an internal request that presents no matching certificate (M/761379:83-104), while
+        # the peer-address fallback still serves a device with no stored fingerprint. Every
+        # DIY-Key call to :7444 (clip/image fetches, callbacks) passes cert=(CERT_PATH,
+        # KEY_PATH), so enabling it changes nothing about how Protect connects.
+        "supportAiProcessorInternalMtls": _feature(True),
+        # Absent reads false (attr defaultValue false, M/59223): sent explicitly so it is
+        # visibly off. A real key blinks its LED on `locate`, which DIY-Key can't do.
+        "supportLocate": False,
+    }
+
+
 # Set by changeAiInferAgentSettings {modelMode}; Protect reads it back as featureFlags.aiMode.
 _ai_mode = "basic"
+# The rest of changeAiInferAgentSettings: updateAiSettings sends enableFaceRecognize,
+# enableLprRecognize, enableRAM, enableSTT, enableFaceEnhance, deepModeSupported and region
+# (no modelMode) on every connect and whenever the NVR's AI settings change (Protect
+# M/288811:15-26, M/738405:27-42). Read with ai_setting_enabled().
+_ai_settings = {}
 # latestFirmwareVersion from the console's last firmwareState: the update target when the
 # updateFirmware uri doesn't name one.
 _latest_fw = None
@@ -283,6 +361,8 @@ def _nl_search_loop(fallback_host_port, device_info):
                          additional_headers={"x-ident": device_info["mac_nosep"]},
                          ssl=build_ssl_context(), open_timeout=15, **extra) as ws:
                 log.info("nl-search connected to %s", url)
+                global _nl_ws
+                _nl_ws = ws
                 backoff = 5
                 for raw in ws:
                     if isinstance(raw, str):
@@ -300,6 +380,8 @@ def _nl_search_loop(fallback_host_port, device_info):
                         reply))
         except Exception as e:  # noqa: BLE001 -- reconnect on anything
             log.warning("nl-search connection to %s ended: %r -- retrying in %ds", url, e, backoff)
+        finally:
+            _nl_ws = None
         time.sleep(backoff)
         backoff = min(backoff * 2, 60)
 
@@ -315,6 +397,13 @@ def wait_for_adopt_state(fallback_host_port, poll_interval=1.0, fallback_after=1
     log.info("waiting for %s to appear (written by stage1_http on a successful adopt POST)...",
              ADOPT_STATE_FILE)
     waited = 0.0
+    if not config.is_adopted(STATE_DIR):
+        # Empty/absent state (never adopted, or factory-reset by Protect): only a fresh adopt
+        # POST may start a session. Live 2026-11-07: tokenless reconnects after a removal kept an
+        # unadopted key showing lastSeen and receiving recognizeKeyFrames.
+        fallback_host_port = None
+        log.info("not adopted (adopt_state empty) -- waiting for a fresh adopt POST; "
+                 "tokenless reconnect disabled")
     while True:
         if os.path.exists(ADOPT_STATE_FILE):
             state = config.read_adopt_state(STATE_DIR)
@@ -337,6 +426,195 @@ def build_ssl_context():
     return ctx
 
 
+def ai_setting_enabled(name, default=False):
+    """Whether Protect's last changeAiInferAgentSettings turned `name` on, e.g.
+    "enableFaceRecognize" or "enableLprRecognize" (Protect M/288811:15-26). `default` until
+    Protect has sent it; it does so on every connect (M/738405:27-42)."""
+    value = _ai_settings.get(name)
+    return default if value is None else bool(value)
+
+
+# recognizeKeyFrames/RequestAI run on a small worker pool instead of a thread each: a burst
+# of events (or a retroactive-processing backfill) would otherwise fetch and tag dozens of
+# clips at once. Protect stops dispatching to a processor whose queue is over 200 (Protect
+# M/851272:100-106), so a full queue here means something is wrong; drop rather than grow.
+# Tasks that waited past DIYKEY_TASK_DROP_AGE_S are discarded when dequeued: Protect has
+# given up on them by then and the result would only be rejected.
+_task_lock = threading.Lock()
+_task_q = None
+# queued/running count every task; queued_<group>/running_<group> also count the tasks of a
+# group getTaskQueueInfo reports on its own ("ram": recognizeKeyFrames, "enhance": enhanceImage).
+_task_stats = {"queued": 0, "queued_ram": 0, "queued_enhance": 0, "running": 0,
+               "running_ram": 0, "running_enhance": 0, "dropped": 0}
+# A recognizeKeyFrames task also counts under "face"/"lpr" when it will run that model
+# (UI_AUTO_FACE_RECOGNITION / UI_AUTO_LPR_RECOGNITION in getTaskQueueInfo).
+
+
+def _task_group(tag):
+    """Queue items carry the old `ram` bool, a group name or a tuple of group names (a task
+    can belong to several: recognizeKeyFrames is "ram" plus "face"/"lpr"); True means "ram"."""
+    if tag is True:
+        return ("ram",)
+    if isinstance(tag, (tuple, list)):
+        return tuple(tag)
+    return (tag,) if tag else ()
+
+
+def _count(state, group, n):
+    """Adjust `state` ("queued"/"running") and its group counters; caller holds _task_lock."""
+    _task_stats[state] += n
+    for g in _task_group(group):
+        key = f"{state}_{g}"
+        _task_stats[key] = _task_stats.get(key, 0) + n
+
+
+def _env_number(name, default, cast=int):
+    try:
+        return cast(os.environ.get(name) or default)
+    except ValueError:
+        log.warning("%s=%r is not a number; using %s", name, os.environ.get(name), default)
+        return cast(default)
+
+
+def _task_worker(q):
+    drop_age = _env_number("DIYKEY_TASK_DROP_AGE_S", 900, float)
+    while True:
+        queued_at, kind, fn, args, tag = q.get()
+        group = _task_group(tag)
+        age = time.monotonic() - queued_at
+        with _task_lock:
+            _count("queued", group, -1)
+            stale = age > drop_age
+            if stale:
+                _task_stats["dropped"] += 1
+            else:
+                _count("running", group, 1)
+        if stale:
+            log.warning("%s task waited %.0fs (> DIYKEY_TASK_DROP_AGE_S=%.0f); dropped",
+                        kind, age, drop_age)
+            continue
+        try:
+            fn(*args)
+        except Exception:  # noqa: BLE001 -- one bad task must not kill the worker
+            log.exception("%s task failed", kind)
+        finally:
+            with _task_lock:
+                _count("running", group, -1)
+
+
+def _task_queue():
+    """The task queue, with its DIYKEY_TASK_WORKERS workers started on first use."""
+    global _task_q
+    with _task_lock:
+        if _task_q is None:
+            _task_q = queue.Queue(maxsize=max(1, _env_number("DIYKEY_TASK_QUEUE_MAX", 200)))
+            workers = max(1, _env_number("DIYKEY_TASK_WORKERS", 1))
+            for n in range(workers):
+                threading.Thread(target=_task_worker, args=(_task_q,), daemon=True,
+                                 name=f"diykey-task-{n}").start()
+            log.info("task queue: %d worker(s), max %d queued", workers, _task_q.maxsize)
+        return _task_q
+
+
+def _submit_task(kind, fn, args, ram=False, group=None, extra_groups=()):
+    """Queue fn(*args); False (and a warning) when the queue is full. ram=True is
+    group="ram"; a group's tasks are also counted under queued_/running_<group>.
+    extra_groups are further groups to count the task under (see _task_group)."""
+    q = _task_queue()
+    group = _task_group("ram" if ram else group) + tuple(extra_groups)
+    with _task_lock:
+        try:
+            q.put_nowait((time.monotonic(), kind, fn, args, group))
+        except queue.Full:
+            _task_stats["dropped"] += 1
+            log.warning("task queue full (%d); dropped %s", q.maxsize, kind)
+            return False
+        _count("queued", group, 1)
+    return True
+
+
+_fast_lane = 0
+
+
+def _fast_lane_count():
+    with _task_lock:
+        return _fast_lane
+
+
+def _fast_lane_run(fn, *args):
+    """Run fn(*args) counted in UI_TASK_FAST_LANE (on-demand summary thread body)."""
+    global _fast_lane
+    with _task_lock:
+        _fast_lane += 1
+    try:
+        fn(*args)
+    finally:
+        with _task_lock:
+            _fast_lane -= 1
+
+
+def task_queue_stats():
+    with _task_lock:
+        return dict(_task_stats)
+
+
+class ActionError(Exception):
+    """handle_action's way to fail a request: _consume sends it as the response head's
+    errorCode/error (ucpv4_send_response's {"errorCode":%d,"error":"%m"} shape)."""
+
+    def __init__(self, code, message):
+        super().__init__(message)
+        self.code, self.message = code, message
+
+
+UNKNOWN_ACTION_CODE = -95
+# Admin actions the firmware routes (ui-websocketd + syswrapper) that DIY-Key has nothing to do
+# for; Protect expects them to succeed. locate stays an ack although supportLocate is false.
+ACK_ONLY_ACTIONS = frozenset({
+    "getSupportInfo", "setInfo", "updateTimezone", "sshService", "locate", "reboot",
+    "updateLcmSettings", "setConsoleInfo",
+    "speechToText", "RequestTts"})
+# Actions handled by the if/elif chains in handle_action (the ones above are acks too).
+HANDLED_ACTIONS = frozenset({
+    "getInfo", "firmwareState", "updateFirmware", "networkStatus", "changeUserPassword",
+    "changeAiInferAgentSettings", "diskInfo", "systemMetrics", "getTaskQueueInfo",
+    "recognizeKeyFrames", "fastReverification", "enhanceImage", "enhanceImageGroup",
+    "RequestAI", "factoryReset", "restoreDefault"})
+_ack_only_logged = set()
+# Tokens are single-use: send X-Token only the first time a value is seen. Module-level so a
+# factory reset can forget them (a re-adopt may legitimately reuse nothing, but stale entries
+# would also suppress a repeated token).
+_used_tokens = set()
+# The live nl-search socket, so a factory reset can drop it (the loop only re-checks adoption
+# between connections).
+_nl_ws = None
+# Set by a factoryReset/restoreDefault; _consume closes the ucp4 socket after the reply is sent.
+_reset_pending = threading.Event()
+
+
+def _factory_reset(action):
+    """Un-adopt locally, like the firmware's restore_default (aikey-fw 2.2.8 syswrapper.sh
+    restore_default ~L4334: `rm -rf /etc/persistent/cfg/*` drops controller.cfg, i.e. the
+    adoption; resets the ui/ubnt credentials and the Protect PostgreSQL credential; then the
+    unit reboots and comes back unadopted, X-Adopted false). Live 2026-11-07 22:32:47 (Protect
+    7.3.74): removing the AI Key sent factoryReset {} then changeAiInferAgentSettings; an ack-only
+    DIY-Key kept adopt_state.json, fell back to a tokenless reconnect and stayed 'connected' to an
+    console that had forgotten it. We keep server.crt/server.key and the fw_version pin: the
+    firmware's wipe covers cfg/httpd/ulcmd/db, not its identity or installed firmware version,
+    and a fresh adopt POST pins our existing fingerprint."""
+    log.info("action %r: factory reset -- clearing adoption state, dropping used tokens, closing "
+             "ucp4 and nl-search; waiting for a fresh adopt POST (no tokenless reconnect)", action)
+    config.clear_adopt_state(STATE_DIR)
+    _used_tokens.clear()
+    _reset_pending.set()
+    ws = _nl_ws
+    if ws is not None:
+        try:
+            ws.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def handle_action(head, body, device_info):
     global _ai_mode, _latest_fw
     action = head.get("action")
@@ -346,6 +624,13 @@ def handle_action(head, body, device_info):
         return {
             "mac": device_info["mac_nosep"],
             "type": device_info["type"],
+            # Firmware getInfo format (ui-websocketd strings): {"type":"%s","sysid":"%s",
+            # "version":"%s","mac":"%W","uptime":%u,"poeType":"%s","storageSize":%u,
+            # "featureFlags":%s}: sysid is the same "0xa5f0" string as x-sysid, uptime whole
+            # seconds, storageSize a NUMBER here (diskInfo's is the string "%d").
+            "sysid": device_info.get("sysid") or "0xa5f0",
+            "uptime": int(time.time() - PROCESS_START),
+            "storageSize": 256,
             "version": _fw_version(device_info),
             # Read live so ResetToDefaults/readopt can't leave this stale.
             "adopted": config.is_adopted(STATE_DIR),
@@ -354,7 +639,10 @@ def handle_action(head, body, device_info):
             # The console's host, not ours (used to build upload URLs).
             "connectionHost": device_info.get("console_host") or device_info["ip"],
             "poeType": "802.3bt",  # Protect sets requiredPoeType 802.3bt for an AI Key
-            "featureFlags": {**FEATURE_FLAGS, "aiMode": _ai_mode},
+            "featureFlags": {**(flags := _feature_flags()),
+                             # Protect clamps anything but "deep" to basic (M/643837:72) and only
+                             # sends deep to a capable key, so never echo "deep" we don't support.
+                             "aiMode": _ai_mode if flags["supportDeepMode"] else "basic"},
         }
     if action == "firmwareState":
         _latest_fw = (body or {}).get("latestFirmwareVersion") or _latest_fw
@@ -378,57 +666,130 @@ def handle_action(head, body, device_info):
     if action == "changeUserPassword":
         _apply_pg_password((body or {}).get("passwordNew"))
         return {}
-    if action == "changeAiInferAgentSettings" and (body or {}).get("modelMode"):
-        _ai_mode = body["modelMode"]
-        log.info("AI mode set to %s", _ai_mode)
+    if action == "changeAiInferAgentSettings":
+        body = body or {}
+        if body.get("modelMode"):
+            _ai_mode = body["modelMode"]
+            log.info("AI mode set to %s", _ai_mode)
+        settings = {k: v for k, v in body.items() if k != "modelMode"}
+        if settings:
+            _ai_settings.update(settings)
+            log.info("AI settings now %s", _ai_settings)
         return {}
     if action == "diskInfo":
         # Protect parses storageSize as a numeric string into featureFlags.storageSize;
         # 128 makes it the UP-AI-KEY-128 variant, anything else the 256 GB OrinNX256.
         return {"storageSize": "256"}
     if action == "systemMetrics":
-        # CONFIRMED schema: a flat top-level array of {name, value} numbers.
+        # CONFIRMED schema: a flat top-level array of {name, value} numbers. Values are
+        # FRACTIONS 0-1 like the firmware's (aikey-fw 2.2.8 uaibd/hwmon/jtop_systemMetrics.py:
+        # cpu user/100, gpu load/100, RAM used/tot, rounded to 4 places) and no NPU entry
+        # (the real key reports CPU, GPU, Memory only). Protect stores the numbers untouched
+        # (M/606323:29-45) and its one consumer reads PsqlUsage against 0.8
+        # (M/617109:19-21), so fractions are the scale it expects; the UI never reads them.
         raw = collect_system_metrics()
         ram_total = raw["ram"]["totalKilobytes"]
         ram_avail = raw["ram"]["availableKilobytes"]
-        ram_used_pct = (100.0 * (ram_total - ram_avail) / ram_total) if ram_total else 0.0
+        ram_used = ((ram_total - ram_avail) / ram_total) if ram_total else 0.0
         metrics = [
-            {"name": "CPU", "value": raw["cpu"]["load"] or 0.0},
-            {"name": "GPU", "value": raw["gpu"]["load"] or 0.0},
-            {"name": "Memory", "value": round(ram_used_pct, 1)},
-            {"name": "NPU", "value": raw["npu"]["load"] or 0.0},
+            {"name": "CPU", "value": round((raw["cpu"]["load"] or 0.0) / 100, 4)},
+            {"name": "GPU", "value": round((raw["gpu"]["load"] or 0.0) / 100, 4)},
+            {"name": "Memory", "value": round(ram_used, 4)},
         ]
         log.info("systemMetrics -> %s", metrics)
         return {"systemMetrics": metrics}
     if action == "getTaskQueueInfo":
-        # CONFIRMED schema: six numeric counters. `{}` fails validation silently
-        # on every ~5 s poll, so all-zero is the correct idle response.
+        # CONFIRMED schema: six numeric counters. `{}` fails validation silently on every
+        # ~5 s poll (Protect M/691057:234-240). UI_TASK_NUM is what this key really holds
+        # (queued + running), which Protect uses to pick the least-loaded processor;
+        # UI_AUTO_RAM the recognizeKeyFrames share of it, UI_MANUAL_FACE_ENHANCE the
+        # enhanceImage share (the Faces page "Enhance" button: Protect M/851272:188-206). We
+        # run no STT queue and never enhance on our own (UI_AUTO_FACE_ENHANCE).
+        stats = task_queue_stats()
         return {
             "UI_AUDIO_RAM": 0,
             "UI_AUTO_FACE_ENHANCE": 0,
-            "UI_AUTO_RAM": 0,
+            # Firmware's ui-websocketd getTaskQueueInfo also names UI_AUTO_FACE_RECOGNITION,
+            # UI_AUTO_LPR_RECOGNITION and UI_TASK_FAST_LANE (strings of aikey-fw 2.2.8
+            # ui-websocketd). Face/LPR: recognizeKeyFrames tasks that will run that model.
+            "UI_AUTO_FACE_RECOGNITION": (stats.get("queued_face", 0)
+                                         + stats.get("running_face", 0)),
+            "UI_AUTO_LPR_RECOGNITION": (stats.get("queued_lpr", 0)
+                                        + stats.get("running_lpr", 0)),
+            # Fast lane = on-demand work that bypasses the queue. Ours are the on-demand
+            # RequestAI summary threads, counted in _fast_lane while in flight.
+            "UI_TASK_FAST_LANE": _fast_lane_count(),
+            "UI_AUTO_RAM": stats.get("queued_ram", 0) + stats.get("running_ram", 0),
             "UI_AUTO_STT": 0,
-            "UI_MANUAL_FACE_ENHANCE": 0,
-            "UI_TASK_NUM": 0,
+            "UI_MANUAL_FACE_ENHANCE": (stats.get("queued_enhance", 0)
+                                       + stats.get("running_enhance", 0)),
+            "UI_TASK_NUM": stats["queued"] + stats["running"],
         }
     if action == "recognizeKeyFrames":
         # Confirmed live: the console asks us to deep-analyse a clip, then we
         # POST the result (multipart field `ram`) to the console's resUrl.
-        threading.Thread(
-            target=_handle_recognize,
-            args=(device_info["console_host"], device_info["mac_nosep"], body),
-            daemon=True,
-        ).start()
+        # Face/LPR share of the queue for getTaskQueueInfo: the models run when _wanted_metas
+        # has entries for them (same gates as _handle_recognize).
+        wanted = _wanted_metas(body or {})
+        extra = tuple(g for g in ("face", "lpr") if g in wanted)
+        _submit_task("recognizeKeyFrames", _handle_recognize,
+                     (device_info["console_host"], device_info["mac_nosep"], body), ram=True,
+                     **({"extra_groups": extra} if extra else {}))
+    elif action == "fastReverification":
+        # Second Stage Verification from per-thumbnail JPEGs (or a clip when Protect falls
+        # back), aikey-fw 2.2.8 syswrapper.sh:3324-3640. Same queue as the other model work.
+        _submit_task("fastReverification", _handle_fast_reverification,
+                     (device_info["console_host"], device_info["mac_nosep"], body))
+    elif action == "enhanceImage":
+        # Faces page "Enhance" (Protect M/851272:188-206): ack now, fetch/enhance/upload the
+        # face JPEG from the queue; Protect learns the outcome from the resUrl upload.
+        _submit_task("enhanceImage", _handle_enhance_image,
+                     (device_info["console_host"], device_info["mac_nosep"], body),
+                     group="enhance")
+    elif action == "enhanceImageGroup":
+        # Faces page group portrait (firmware download_image_to_enhance_group_from_json,
+        # SW:1672-1704): same queue and UI_MANUAL_FACE_ENHANCE share as enhanceImage.
+        _submit_task("enhanceImageGroup", _handle_enhance_image_group,
+                     (device_info["console_host"], device_info["mac_nosep"], body),
+                     group="enhance")
+    elif action == "RequestAI" and str((body or {}).get("targetUri") or "").endswith(
+            DESCRIBE_URI):
+        # Deep-mode describe (M/851272:218-255, timeoutMs 30 s): runs on the shared worker
+        # pool; in deep mode RAM is off (M/851272:119) so that queue holds only these.
+        _submit_task("describe", _handle_describe,
+                     (device_info["console_host"], device_info["mac_nosep"], body))
+    elif action == "RequestAI" and str((body or {}).get("targetUri") or "").endswith(
+            EMBED_URI):
+        _submit_task("generateEmbeddings", _handle_generate_embeddings,
+                     (device_info["console_host"], device_info["mac_nosep"], body))
+    elif action == "RequestAI" and str((body or {}).get("targetUri") or "").endswith(
+            VLM_ON_DEMAND_URI):
+        # On-demand AI Summary (visionToLanguage, Protect M/309156:20-47). requestAi gives up
+        # after 15 s (M/490990:11-24), so it gets its own thread: queued behind a burst of
+        # recognizeKeyFrames clips on the default single worker it would always time out.
+        threading.Thread(target=_fast_lane_run,
+                         args=(_on_demand_summary, device_info["console_host"],
+                               device_info["mac_nosep"], body),
+                         daemon=True, name="diykey-vlm-on-demand").start()
     elif action == "RequestAI":
         # targetUri (":7788/v1/models/<model>/inference") means "call your own
         # local gateway": there is no console callback into :7788.
-        threading.Thread(
-            target=_post_request_ai_result,
-            args=(device_info["mac_nosep"], body),
-            daemon=True,
-        ).start()
-    # Unknown/unimplemented action: ack with an empty body so the controller's
-    # RPC doesn't hang, and log it so the next real shape can be captured.
+        _submit_task("RequestAI", _post_request_ai_result, (device_info["mac_nosep"], body))
+    elif action in ("factoryReset", "restoreDefault"):
+        _factory_reset(action)
+    elif action in ACK_ONLY_ACTIONS:
+        # The firmware handles these (syswrapper/ui-websocketd) but they mean nothing to a
+        # software key; an empty ack keeps Protect's RPC from failing. Said once per name.
+        if action not in _ack_only_logged:
+            _ack_only_logged.add(action)
+            log.info("action %r is ack-only (nothing to do on DIY-Key)", action)
+    elif action not in HANDLED_ACTIONS:
+        # The firmware's router logs "Unknown action: %r" and fails the request with
+        # errorCode -95 (EOPNOTSUPP; aikey-fw 2.2.8 ui-websocketd aikey_route_on_request
+        # falls through with w20=-95, echoed by ucpv4_echo_response). An empty ack would
+        # tell Protect an unimplemented feature worked.
+        log.warning("Unknown action: %r (replying errorCode %d)", action, UNKNOWN_ACTION_CODE)
+        raise ActionError(UNKNOWN_ACTION_CODE, f"Unknown action: {action}")
     return {}
 
 
@@ -544,6 +905,78 @@ def _post_request_ai_result(mac_nosep, task_body):
         log.warning("POST %s failed: %r", res_url, e)
 
 
+def _handle_fast_reverification(console_host, mac_nosep, body):
+    """fastReverification (aikey-fw 2.2.8 syswrapper.sh:3324-3640): re-classify the boxes of
+    thumbnailMeta and POST the verdict as multipart field `reverification` to resUrl.
+
+    reqUrl is a list of image URLs, one per thumbnailMs (fast path, downloaded as-is), or a
+    single clip URL (fallback: grab each thumbnail time from it). The firmware drops a
+    thumbnail whose download fails or that has no thumbnailMeta entry, aborts when the list
+    and thumbnailMs lengths differ, and hands the frames to its ReverificationProc model;
+    here the frames go through second_verifier (the same boxes-vs-detector logic as
+    RequestAI/second_verifier_mlabel) and the flat reverificationInferenceSchema result is
+    posted. With no detector or no frames at all the placeholder (every box left valid,
+    modelRunStatus "skipped") goes back, as for RequestAI, so Protect's task still ends."""
+    body = body or {}
+    camera_id, event_id = body.get("camera"), body.get("event")
+    res_url, req_url = body.get("resUrl"), body.get("reqUrl")
+    moments = list(body.get("thumbnailMs") or [])
+    metas = {e.get("ts"): e for e in body.get("thumbnailMeta") or []}
+    if not res_url or not STATE_DIR:
+        log.warning("fastReverification without resUrl (or state dir): %s", body)
+        return
+    if isinstance(req_url, list) and len(req_url) != len(moments):
+        log.warning("fastReverification %s: reqUrl has %d images but thumbnailMs %d; aborting "
+                    "like the firmware", event_id, len(req_url), len(moments))
+        return
+    params = {"camera": camera_id, "event": event_id,
+              "thumbnailMeta": [metas[ts] for ts in moments if ts in metas] if moments
+              else list(metas.values()),
+              "score_threshold": body.get("score_threshold", 0.8)}
+    headers, cert = _callback_headers(mac_nosep), (CERT_PATH, KEY_PATH)
+    clips_dir = os.path.join(STATE_DIR, "clips")
+    frames = {}
+    if isinstance(req_url, list):
+        out_dir = os.path.join(clips_dir, f"{re.sub(r'[^A-Za-z0-9_.-]', '_', str(event_id))}"
+                                          "-reverify-images")
+        for ts, url in zip(moments, req_url):
+            if not url or ts not in metas:
+                continue
+            path = clip_fetch.fetch_image(_abs_url(console_host, url), headers, cert,
+                                          os.path.join(out_dir, f"{camera_id}_{ts}.jpg"))
+            if path:
+                frames[ts] = path
+    elif isinstance(req_url, str) and req_url and moments:
+        clip = clip_fetch.fetch_clip(clip_fetch.mp4_url(console_host, CONSOLE_INTERNAL_API_PORT,
+                                                        req_url),
+                                     headers, cert, clips_dir, f"{event_id}-reverify")
+        if clip:
+            start = body.get("start")
+            frames = clip_fetch.extract_frames(clip, int(start) if start is not None
+                                               else min(moments), sorted(moments))
+    clip_fetch.prune(clips_dir)
+    result = None
+    tagger = _get_tagger()
+    if tagger:
+        t0 = time.monotonic()
+        try:
+            result = second_verifier.verify(tagger, frames, params)
+            result["timeElapsedMs"] = int((time.monotonic() - t0) * 1000)
+        except Exception as e:  # noqa: BLE001 -- fall back to the placeholder
+            log.warning("fastReverification failed for event %s: %r", event_id, e)
+    result = result or _second_verifier_result(params)
+    log.info("fastReverification %s: %d/%d frames, %d verdicts", event_id, len(frames),
+             len(moments), len(result["verificationResults"]))
+    url = _abs_url(console_host, res_url)
+    files = {"reverification": ("reverification.json", json.dumps(result), "application/json")}
+    try:
+        resp = requests.post(url, headers=headers, files=files, cert=cert, verify=False,
+                             timeout=30)
+        log.info("POST %s [reverification] -> %s: %s", url, resp.status_code, resp.text[:500])
+    except requests.RequestException as e:
+        log.warning("POST %s failed: %r", url, e)
+
+
 _tagger = None
 _tagger_lock = threading.Lock()
 _tagger_warned = False
@@ -554,13 +987,13 @@ def _get_tagger():
     global _tagger, _tagger_warned
     path = os.environ.get("DIYKEY_RAM_MODEL")
     if not path:
-        # Say it once: without a model every recognizeKeyFrames reply is an empty
-        # placeholder, which otherwise looks like successful processing in the log.
+        # Say it once: without a model recognizeKeyFrames has no RAM result to send,
+        # which otherwise looks like successful processing in the log.
         with _tagger_lock:
             if not _tagger_warned:
                 _tagger_warned = True
                 log.warning("RAM tagging disabled: DIYKEY_RAM_MODEL is unset -- "
-                            "recognizeKeyFrames results will be empty placeholders")
+                            "recognizeKeyFrames will send no RAM result")
         return None
     with _tagger_lock:
         if _tagger is None:
@@ -573,10 +1006,12 @@ def _get_tagger():
 
 
 def _handle_recognize(console_host, mac_nosep, body):
-    """Fetch the task's clip, tag its key-moment and thumbnail frames, and POST
-    the result. Every step is best effort: on a failure the placeholder goes back."""
+    """Fetch the task's clip, tag its key-moment and thumbnail frames, add face/plate parts
+    when asked, and POST the result; then, for postVLM, a second POST with the summary.
+    Every step is best effort: on a failure that part is left out."""
     camera_id, event_id = body.get("camera"), body.get("event")
     result = None
+    parts, images, frames = {}, {}, {}
     req_url = body.get("reqUrl")
     if body.get("ramType") in ("image", "multipleImages") and STATE_DIR:
         # Retroactive processing (and image RAM): cropped JPEGs by imageId, no clip.
@@ -588,21 +1023,555 @@ def _handle_recognize(console_host, mac_nosep, body):
         clip = clip_fetch.fetch_clip(url, _callback_headers(mac_nosep), (CERT_PATH, KEY_PATH),
                                      clips_dir, event_id)
         if clip and body.get("start") is not None:
-            moments = sorted(set(body.get("keyMoments") or []) | set(body.get("thumbnailMs") or []))
-            frames = clip_fetch.extract_frames(clip, body["start"], moments)
-            log.info("event %s: %d/%d frames", event_id, len(frames), len(moments))
+            start = int(body["start"])
+            ram_moments = set(body.get("keyMoments") or []) | set(body.get("thumbnailMs") or [])
+            metas = _wanted_metas(body)
+            meta_start = _meta_start_ms(metas, start)
+            face_meta = _flatten_meta(body.get("faceMeta")) if "face" in metas else []
+            meta_moments = {_meta_wall_ms(e["ts"], meta_start)
+                            for entries in (*metas.values(), face_meta) for e in entries}
+            # One ffmpeg pass list for both: the meta frames are extra grabs, not key moments.
+            frames = clip_fetch.extract_frames(clip, start, sorted(ram_moments | meta_moments))
+            ram_frames = {ms: p for ms, p in frames.items() if ms in ram_moments}
+            log.info("event %s: %d/%d frames (%d for face/lpr)", event_id, len(frames),
+                     len(ram_moments | meta_moments), len(meta_moments - ram_moments))
             tagger = _get_tagger()
-            if tagger and frames:
+            if tagger and ram_frames:
                 try:
-                    result = ram_tagger.build_result(tagger, camera_id, event_id, frames,
-                                                     pre_ms=(time.monotonic() - t0) * 1000,
-                                                     objects=_video_objects(body, frames))
+                    # Only Protect's key moments/thumbnails: a keyMomentsTags row per extra
+                    # face/plate grab would be a key moment Protect never asked about.
+                    # searchSnapshots JPEGs go up as parts named str(trackerID), like the
+                    # firmware (SW:2737-2760, 4037-4060); face/plate parts use offset ids.
+                    result, snaps = ram_tagger.build_result_with_images(
+                        tagger, camera_id, event_id, ram_frames,
+                        pre_ms=(time.monotonic() - t0) * 1000,
+                        objects=_video_objects(body, frames), roi_meta=body.get("roiMeta"))
+                    images.update(snaps or {})
                     log.info("event %s: %s", event_id, result["description"])
                 except Exception as e:  # noqa: BLE001
                     log.warning("RAM tagging failed for event %s: %r", event_id, e)
+            if metas:
+                _add_face_lpr(parts, images, metas, frames, meta_start, camera_id, event_id,
+                              face_meta=face_meta)
         clip_fetch.prune(clips_dir)
     _post_recognize_result(console_host, mac_nosep, body.get("resUrl"), camera_id, event_id,
-                           result)
+                           result, parts=parts or None, images=images or None)
+    if body.get("postVLM") and vlm_describe.enabled():
+        _post_vlm_description(console_host, mac_nosep, body, frames)
+
+
+# Epoch ms from Sep 2001 up; anything smaller is an offset into the clip. Protect's own ts
+# fields (keyMeta, thumbnailMeta, personMeta: Protect M/346308:89-100) all share one
+# z.number() with nothing saying which; keyMoments/thumbnailMs are epoch ms (they seek
+# against body.start), so epoch is the expected case and the offset branch a guard.
+EPOCH_MS_MIN = 10 ** 12
+
+
+def _flatten_meta(meta):
+    """personMeta/vehicleMeta entries with one roi each. The schema makes roi one object
+    (Protect M/346308:76-80, 96-97) but Protect's own linkAiKeyFacesToPersons walks a
+    personMeta roi as an array (M/321055:78-90); accept both."""
+    out = []
+    for entry in meta or []:
+        if not isinstance(entry, dict) or entry.get("ts") is None:
+            continue
+        roi = entry.get("roi")
+        if isinstance(roi, list):
+            out.extend({**entry, "roi": r} for r in roi if isinstance(r, dict))
+        elif isinstance(roi, dict):
+            out.append(entry)
+    return out
+
+
+_ROI_PERSON = ("person",)
+_ROI_VEHICLE = ("vehicle", "car", "truck", "bus", "motorcycle")
+
+
+def _roi_derived_metas(body):
+    """{"person": [...], "vehicle": [...]} personMeta/vehicleMeta-shaped entries built from
+    roiMeta, only for ramType 'videoWithRecognition' and only for the kinds the body lacks.
+
+    Live 21:04 2026-11-07, Protect 7.3.74 (doorbell camera under "Legacy Camera
+    Enhancement"): videoWithRecognition carries only roiMeta (and thumbnailMeta), no
+    personMeta/vehicleMeta/faceMeta, each roi {name, coord, trackerID, trackerId,
+    attributes: {objectType}|None, confidence, objectType}. An explicit personMeta/
+    vehicleMeta always wins; the AI-setting gates stay in _wanted_metas."""
+    if body.get("ramType") != "videoWithRecognition":
+        return {}
+    out = {}
+    for kind, key, types in (("person", "personMeta", _ROI_PERSON),
+                             ("vehicle", "vehicleMeta", _ROI_VEHICLE)):
+        if body.get(key):
+            continue
+        found = []
+        for e in _flatten_meta(body.get("roiMeta")):
+            r = e["roi"]
+            otype = r.get("objectType") or (r.get("attributes") or {}).get("objectType")
+            if otype in types and r.get("coord") is not None:
+                tid = r.get("trackerId", r.get("trackerID"))
+                found.append({"ts": e["ts"], "roi": {"coord": r["coord"], "objectType": otype,
+                                                     "trackerId": tid}})
+        if found:
+            out[kind] = found
+    if out:
+        log.info("event %s: derived %d person / %d vehicle rois from roiMeta",
+                 body.get("event"), len(out.get("person", ())), len(out.get("vehicle", ())))
+    return out
+
+
+def _wanted_metas(body):
+    """{"face": personMeta, "lpr": vehicleMeta} for the features this task should run.
+
+    Each needs the DIYKEY_* key (what we advertise) and Protect's AI setting: the firmware
+    deletes personMeta unless enableFaceRecognize (or pose) is on and vehicleMeta unless
+    enableLprRecognize is (aikey-fw 2.2.8 syswrapper.sh:2456-2482), and Protect only adds them
+    for cameras with the feature enabled on this processor (M/851272:421-425). faceMeta
+    (Protect's own face boxes) is passed separately as face_meta (see _handle_recognize)."""
+    metas = {}
+    derived = _roi_derived_metas(body)
+    # Live 2026-11-07, Protect 7.3.74: Settings > Intelligence > "Legacy Camera Enhancement"
+    # (face + plates for older cameras) was ON for All cameras with the Face Recognition
+    # legal permission ticked, yet changeAiInferAgentSettings kept sending
+    # enableFaceRecognize False (flipped from True at 21:01:36 while that card was edited;
+    # re-sent False 21:05:30, 21:10:47). Tasks for those cameras arrive with ramType
+    # 'videoWithRecognition' (21:04, doorbell 6a568fa0): Protect already chose them for
+    # recognition, so the per-processor flags are not consulted there. Other ramTypes keep
+    # the 7.3.70 gates (explicit metas + enable flags).
+    legacy = body.get("ramType") == "videoWithRecognition"
+    if _truthy(os.environ.get("DIYKEY_FACE")) and (
+            legacy or ai_setting_enabled("enableFaceRecognize")):
+        person = _flatten_meta(body.get("personMeta"))
+        if not person and "person" in derived:
+            person = derived["person"]
+        if person:
+            metas["face"] = person
+    if _truthy(os.environ.get("DIYKEY_LPR")) and (
+            legacy or ai_setting_enabled("enableLprRecognize")):
+        vehicle = _flatten_meta(body.get("vehicleMeta"))
+        if not vehicle and "vehicle" in derived:
+            vehicle = derived["vehicle"]
+        if vehicle:
+            metas["lpr"] = vehicle
+    return metas
+
+
+def _meta_start_ms(metas, start):
+    """start_ms for face_recog/lpr: None when the meta ts are epoch ms, so their
+    clockBestWall is the ts itself, the same epoch ms RAM sends as keyMomentMs; the clip
+    start when they look like offsets (then wall = start + ts). Unverified live which one
+    Protect sends; decided per event so a snapshot's wall never mixes the two."""
+    ts = [float(e["ts"]) for entries in metas.values() for e in entries]
+    return None if not ts or min(ts) >= EPOCH_MS_MIN else int(start)
+
+
+def _meta_wall_ms(ts, meta_start):
+    return int(float(ts)) + (meta_start or 0)
+
+
+def _add_face_lpr(parts, images, metas, frames, meta_start, camera_id, event_id,
+                  face_meta=None):
+    """Run face_recog/lpr on the grabbed frames and add their parts and JPEGs. face_meta is
+    Protect's own camera face boxes (body faceMeta, personMeta-shaped, roi flattened)."""
+    import cv2
+    bgr = {}  # ts as Protect sent it (both modules look frames up by that) -> BGR frame
+    for entries in (*metas.values(), face_meta or []):
+        for e in entries:
+            if e["ts"] in bgr:
+                continue
+            path = frames.get(_meta_wall_ms(e["ts"], meta_start))
+            img = cv2.imread(path) if path else None
+            if img is not None:
+                bgr[e["ts"]] = img
+    for name, build in (("face", face_recog.build_face_result), ("lpr", lpr.build_lpr)):
+        if name not in metas:
+            continue
+        try:
+            if name == "face" and face_meta:
+                try:
+                    out = build(camera_id, event_id, bgr, metas[name], start_ms=meta_start,
+                                face_meta=face_meta)
+                except TypeError:  # face_recog without the face_meta keyword yet
+                    out = build(camera_id, event_id, bgr, metas[name], start_ms=meta_start)
+            else:
+                out = build(camera_id, event_id, bgr, metas[name], start_ms=meta_start)
+        except Exception as e:  # noqa: BLE001 -- the other parts still go
+            log.warning("%s failed for event %s: %r", name, event_id, e)
+            continue
+        if not out:
+            log.info("event %s: no %s result", event_id, name)
+            continue
+        part, jpegs = out
+        parts[name] = part
+        _merge_images(images, jpegs, name, event_id)
+
+
+def _merge_images(images, new, source, event_id):
+    """Add `new` JPEGs ({key: bytes}) to `images` without replacing one already there: the
+    multipart field is the snapshot trackerID, and face (+100000) / plate (+200000) ids are
+    offset to stay clear of RAM's tracker ids, so a collision means an id scheme broke."""
+    for key, jpeg in (new or {}).items():
+        key = str(key)
+        if key in images:
+            log.warning("event %s: %s image %s collides with an earlier part's; kept the first",
+                        event_id, source, key)
+            continue
+        images[key] = jpeg
+
+
+def _vlm_frame(body, frames):
+    """The still for the auto summary: the firmware's VLM agent uses the RAM key frame, else
+    the first thumbnail frame, else the first key-moment frame (aikey-fw 2.2.8 ui-vlm-agent
+    app.py:343-348). We keep no "best" frame, so: first thumbnail, else the middle key moment."""
+    for ms in body.get("thumbnailMs") or []:
+        if ms in frames:
+            return frames[ms]
+    moments = [ms for ms in sorted(body.get("keyMoments") or []) if ms in frames]
+    return frames[moments[len(moments) // 2]] if moments else None
+
+
+def _post_vlm_description(console_host, mac_nosep, body, frames):
+    """postVLM: the AI Key's VLM agent posts a second multipart after the RAM result, with
+    only ram={eventId, status, description} (ui-vlm-agent app.py:376-405). Protect reads a
+    ram without keyMomentsTags as a description update to the event (M/315148:99-105,
+    M/618986:72-74 -> saveRamDescriptionEnhancement M/543268:18-29). cameraId is added: the
+    firmware omits it, but Protect's description schema requires it (M/315148:99-104)."""
+    import cv2
+    camera_id, event_id = body.get("camera"), body.get("event")
+    path = _vlm_frame(body, frames)
+    img = cv2.imread(path) if path else None
+    if img is None:
+        log.info("event %s: postVLM but no frame to describe", event_id)
+        return
+    text = vlm_describe.describe(img)
+    if not text:
+        log.info("event %s: postVLM but no description", event_id)
+        return
+    log.info("event %s: summary %r", event_id, text)
+    _post_recognize_result(console_host, mac_nosep, body.get("resUrl"), camera_id, event_id,
+                           {"cameraId": camera_id, "eventId": event_id, "status": "success",
+                            "description": text})
+
+
+def _abs_url(console_host, url):
+    """A console-relative callback URL made absolute on the internal API port."""
+    return url if url.startswith("http") else \
+        f"https://{console_host}:{CONSOLE_INTERNAL_API_PORT}{url}"
+
+
+def _handle_enhance_image(console_host, mac_nosep, body):
+    """enhanceImage: fetch reqUrl (the face JPEG), enhance it, upload to resUrl.
+
+    The upload is the firmware's upload_image (aikey-fw 2.2.8 syswrapper.sh:3716-3735):
+    multipart file + camera + type=face + smartDetectObject, which Protect's
+    /aiprocessors/image/enhanced requires (400 without smartDetectObject, type != face or no
+    file: M/761379:150-170). Like the firmware, the original goes up when enhancement is off or
+    fails (syswrapper.sh:1623-1628) -- face_enhance.enhance already returns it on failure."""
+    body = body or {}
+    req_url, obj = body.get("reqUrl"), body.get("smartDetectObject")
+    res_url = body.get("resUrl") or "/internal/aiprocessors/image/enhanced"
+    if not req_url or not obj or not STATE_DIR:
+        log.warning("enhanceImage without reqUrl/smartDetectObject (or state dir): %s", body)
+        return
+    name = re.sub(r"[^A-Za-z0-9_.-]", "_", str(body.get("imageId") or obj))
+    got = _fetch_and_enhance(console_host, mac_nosep, req_url, name)
+    if not got:
+        return
+    original, jpeg = got
+    files = {
+        "file": (f"{name}.jpg", jpeg, "image/jpeg"),
+        "camera": (None, str(body.get("camera") or "")),
+        "type": (None, "face", "text/plain"),
+        "smartDetectObject": (None, str(obj), "text/plain"),
+    }
+    _post_enhanced("enhanceImage", obj, console_host, mac_nosep, res_url, files, original, jpeg)
+
+
+def _fetch_and_enhance(console_host, mac_nosep, req_url, name):
+    """(original, jpeg) for the face image at req_url, or None when the fetch fails."""
+    path = os.path.join(STATE_DIR, "clips", "enhance", f"{name}.jpg")
+    if not clip_fetch.fetch_image(_abs_url(console_host, req_url), _callback_headers(mac_nosep),
+                                  (CERT_PATH, KEY_PATH), path):
+        return None
+    try:
+        with open(path, "rb") as f:
+            original = f.read()
+    finally:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+    jpeg = face_enhance.enhance(original) if _truthy(os.environ.get("DIYKEY_FACE_ENHANCE")) \
+        else original
+    return original, jpeg
+
+
+def _post_enhanced(kind, ident, console_host, mac_nosep, res_url, files, original, jpeg):
+    url = _abs_url(console_host, res_url)
+    try:
+        resp = requests.post(url, headers=_callback_headers(mac_nosep), files=files,
+                             cert=(CERT_PATH, KEY_PATH), verify=False, timeout=15)
+        log.info("%s %s (%s, %d -> %d bytes): POST %s -> %s: %s", kind, ident,
+                 "enhanced" if jpeg is not original else "original", len(original), len(jpeg),
+                 url, resp.status_code, resp.text[:300])
+    except requests.RequestException as e:
+        log.warning("%s POST %s failed: %r", kind, url, e)
+
+
+def _handle_enhance_image_group(console_host, mac_nosep, body):
+    """enhanceImageGroup: the face-group portrait variant of enhanceImage.
+
+    Firmware download_image_to_enhance_group_from_json (aikey-fw 2.2.8 syswrapper.sh:1672-1704)
+    reads reqUrl, resUrl, smartDetectObjectGroup and imageUpdatedAt, downloads reqUrl and
+    upload_image_group (SW:3747-3780) posts multipart file + imageUpdatedAt + type=face +
+    smartDetectObjectGroup. No camera and no smartDetectObject (the single-object route needs
+    both, M/761379:150-170). imageUpdatedAt is echoed verbatim so Protect can tell whether the
+    group's image changed while we worked. The original goes up when enhancement is off or
+    fails, as for enhanceImage (SW:1884-1888). Protect 7.3.70 has no dispatcher for this
+    action (not found in M); it exists in the firmware, so it is handled for a newer Protect."""
+    body = body or {}
+    req_url, group = body.get("reqUrl"), body.get("smartDetectObjectGroup")
+    res_url = body.get("resUrl")
+    if not req_url or not group or not res_url or not STATE_DIR:
+        log.warning("enhanceImageGroup without reqUrl/resUrl/smartDetectObjectGroup (or state "
+                    "dir): %s", body)
+        return
+    name = re.sub(r"[^A-Za-z0-9_.-]", "_", f"group-{group}")
+    got = _fetch_and_enhance(console_host, mac_nosep, req_url, name)
+    if not got:
+        return
+    original, jpeg = got
+    files = {
+        "file": (f"{name}.jpg", jpeg, "image/jpeg"),
+        "imageUpdatedAt": (None, str(body.get("imageUpdatedAt") if
+                                     body.get("imageUpdatedAt") is not None else "")),
+        "type": (None, "face", "text/plain"),
+        "smartDetectObjectGroup": (None, str(group), "text/plain"),
+    }
+    _post_enhanced("enhanceImageGroup", group, console_host, mac_nosep, res_url, files,
+                   original, jpeg)
+
+
+# Deep Understanding targets (Protect M/851272:196-255).
+DESCRIBE_URI = ":7968/describe"
+EMBED_URI = ":7445/generate-embeddings"
+DESCRIBE_MODEL = "diykey-vlm"
+
+
+def _describe_frame(console_host, mac_nosep, payload):
+    """The BGR still a describe task is about: the middle object of the first video that
+    yields a frame (Protect sends `videos` [{reqUrl, objects:[{ts, coord, ...}]}] from the
+    close pass and `images` [{reqUrl, thumbnailId}] from the open pass, M/851272:222-247;
+    reqUrl's start/end are epoch ms like every export), else the first fetched image."""
+    import cv2
+    clips_dir = os.path.join(STATE_DIR, "clips")
+    hdr, cert = _callback_headers(mac_nosep), (CERT_PATH, KEY_PATH)
+    tag = re.sub(r"[^A-Za-z0-9_.-]", "_", str(payload.get("event") or "describe"))
+    img = None
+    for i, video in enumerate(payload.get("videos") or []):
+        req = video.get("reqUrl")
+        objs = sorted((o for o in video.get("objects") or [] if o.get("ts") is not None),
+                      key=lambda o: o["ts"])
+        start = dict(parse_qsl(urlsplit(req or "").query)).get("start")
+        if not req or not objs or not start:
+            continue
+        clip = clip_fetch.fetch_clip(clip_fetch.mp4_url(console_host, CONSOLE_INTERNAL_API_PORT,
+                                                        req), hdr, cert, clips_dir,
+                                     f"{tag}-describe{i}")
+        if not clip:
+            continue
+        moment = int(objs[len(objs) // 2]["ts"])
+        frames = clip_fetch.extract_frames(clip, int(start), [moment])
+        img = cv2.imread(frames[moment]) if moment in frames else None
+        if img is not None:
+            break
+    if img is None:
+        for i, image in enumerate(payload.get("images") or []):
+            req = image.get("reqUrl")
+            path = os.path.join(clips_dir, "describe", f"{tag}-{i}.jpg")
+            if req and clip_fetch.fetch_image(_abs_url(console_host, req), hdr, cert, path):
+                img = cv2.imread(path)
+                if img is not None:
+                    break
+    clip_fetch.prune(clips_dir)
+    return img
+
+
+def _describe_labels(img):
+    """ram_tagger tags (Protect's `labels`, sanitised on its side, M/402297:62) when
+    DIYKEY_RAM_MODEL loads, else None. Colour/night tags are kept: they are the search
+    vocabulary."""
+    tagger = _get_tagger()
+    if not tagger:
+        return None
+    try:
+        labels = [t["tag"] for t in tagger.tag_frame(img)]
+    except Exception as e:  # noqa: BLE001 -- labels are optional
+        log.warning("describe: tagging failed: %r", e)
+        return None
+    return labels or None
+
+
+def _handle_describe(console_host, mac_nosep, task_body):
+    """RequestAI :7968/describe (deep mode): describe one representative frame and POST
+    {camera, event, pass, description, labels?, descEmbedding?, model} to resUrl
+    (/internal/aiprocessors/descriptions/<taskId>, schema M/761379:420-466). An empty
+    description is how a failure is reported: saveDescriptions then logs "leaving session for
+    retry" and completes the task instead of waiting out the 30 s timeout (M/402297:42-52).
+    descEmbedding is the CLIP text embedding of the description, only with DIYKEY_CLIP=1 and
+    DIYKEY_DESC_EMBED=1: Protect's column dimension for it is not in M (CLIP here is
+    768-d, the same space nl_search queries use), so a mismatch would reject saves; unverified."""
+    payload = (task_body or {}).get("payload") or {}
+    res_url = (task_body or {}).get("resUrl")
+    body = {"camera": payload.get("camera"), "event": payload.get("event"),
+            "pass": payload.get("pass"), "description": "", "model": DESCRIBE_MODEL}
+    if not res_url or not STATE_DIR:
+        log.warning("describe without resUrl (or state dir): %s", task_body)
+        return
+    if not vlm_describe.enabled():
+        body["failed"] = [{"reason": "AI summary is not enabled on this processor"}]
+    else:
+        img = _describe_frame(console_host, mac_nosep, payload)
+        text = vlm_describe.describe(img) if img is not None else None
+        if not text:
+            body["failed"] = [{"reason": "no frame" if img is None else "no description"}]
+        else:
+            body["description"] = text
+            labels = _describe_labels(img)
+            if labels:
+                body["labels"] = labels
+            if clip_embed.enabled() and _truthy(os.environ.get("DIYKEY_DESC_EMBED")):
+                vec = clip_embed.text_embed(text)
+                if vec:
+                    body["descEmbedding"] = vec
+    url = _abs_url(console_host, res_url)
+    try:
+        resp = requests.post(url, headers=_callback_headers(mac_nosep), json=body,
+                             cert=(CERT_PATH, KEY_PATH), verify=False, timeout=15)
+        log.info("describe %s/%s: POST %s -> %s: %s", body["event"], body["pass"], url,
+                 resp.status_code, resp.text[:300])
+    except requests.RequestException as e:
+        log.warning("describe POST %s failed: %r", url, e)
+
+
+def _handle_generate_embeddings(console_host, mac_nosep, task_body):
+    """RequestAI :7445/generate-embeddings (M/851272:212-225): payload {camera, event,
+    images:[{reqUrl, thumbnailId, objectId, ...}]}; reply POSTs {camera, event, embeddings:
+    [{objectId, objectType, reidEmbed[1024], model, dim}], failed:[{objectId, reason}]} to resUrl
+    (schema M/761379:376-400; saveEmbeddings M/579892:21-70 keeps only vectors for person objects
+    of that event and groups them into sessions). With DIYKEY_CLIP=1 each crop gets
+    clip_embed.reid_embed (CLIP ViT-L/14 pooled 1024-d, not the firmware's re-ID net; see there
+    for the reidCutoff caveat). Otherwise, or per crop that cannot be fetched/embedded, objects
+    are reported failed so the task completes at once instead of timing out."""
+    import cv2
+    payload = (task_body or {}).get("payload") or {}
+    res_url = (task_body or {}).get("resUrl")
+    if not res_url:
+        return
+    embeddings, failed = [], []
+    on = clip_embed.enabled() and bool(STATE_DIR)
+    hdr, cert = _callback_headers(mac_nosep), (CERT_PATH, KEY_PATH)
+    tag = re.sub(r"[^A-Za-z0-9_.-]", "_", str(payload.get("event") or "embed"))
+    for i, im in enumerate(payload.get("images") or []):
+        oid = im.get("objectId")
+        if not on:
+            failed.append({"objectId": oid, "reason": "no re-ID model"})
+            continue
+        vec = None
+        req = im.get("reqUrl")
+        path = os.path.join(STATE_DIR, "clips", "embed", f"{tag}-{i}.jpg")
+        if req and clip_fetch.fetch_image(_abs_url(console_host, req), hdr, cert, path):
+            try:
+                vec = clip_embed.reid_embed(cv2.imread(path))
+            except Exception as e:  # noqa: BLE001 -- one bad crop must not sink the task
+                log.warning("generateEmbeddings: embed failed for %s: %r", oid, e)
+        if vec:
+            embeddings.append({"objectId": oid, "objectType": im.get("objectType") or "person",
+                               "reidEmbed": vec, "model": clip_embed.REID_MODEL,
+                               "dim": len(vec)})
+        else:
+            failed.append({"objectId": oid, "reason": "no crop" if not req else "embed failed"})
+    body = {"camera": payload.get("camera"), "event": payload.get("event"),
+            "embeddings": embeddings, "failed": failed}
+    url = _abs_url(console_host, res_url)
+    try:
+        resp = requests.post(url, headers=hdr, json=body, cert=cert, verify=False, timeout=15)
+        log.info("generateEmbeddings: %d embedded, %d failed: POST %s -> %s",
+                 len(embeddings), len(failed), url, resp.status_code)
+    except requests.RequestException as e:
+        log.warning("generateEmbeddings POST %s failed: %r", url, e)
+
+
+# requestAi's visionToLanguage target (Protect M/490990:11).
+VLM_ON_DEMAND_URI = ":7968/on_demand_inference"
+
+
+def _on_demand_frame_ms(timestamp, start):
+    """Clip moment for visionToLanguage's timestamp. Protect builds the export as
+    timestamp +/- 5 s (M/309156:22-30), so timestamp is epoch ms; a small value is taken as
+    an offset from the export start in case another caller sends one (unverified)."""
+    ts = int(float(timestamp))
+    return ts if ts >= EPOCH_MS_MIN else int(start) + ts
+
+
+def _summarize_clip(console_host, mac_nosep, payload):
+    """(description, None) or (None, error) for an on-demand summary payload."""
+    import cv2
+    if not vlm_describe.enabled():
+        return None, "AI summary is not enabled on this processor"
+    video_url, ts = payload.get("videoUrl"), payload.get("timestamp")
+    if not video_url or ts is None or not STATE_DIR:
+        return None, "missing videoUrl or timestamp"
+    start = dict(parse_qsl(urlsplit(video_url).query)).get("start")
+    try:
+        start = int(start) if start else int(float(ts)) - 5000
+        moment = _on_demand_frame_ms(ts, start)
+    except (TypeError, ValueError):
+        return None, f"bad timestamp {ts!r}"
+    clips_dir = os.path.join(STATE_DIR, "clips")
+    clip = clip_fetch.fetch_clip(
+        clip_fetch.mp4_url(console_host, CONSOLE_INTERNAL_API_PORT, video_url),
+        _callback_headers(mac_nosep), (CERT_PATH, KEY_PATH), clips_dir,
+        f"{payload.get('eventId') or 'summary'}-summary")
+    if not clip:
+        return None, "could not fetch the clip"
+    frames = clip_fetch.extract_frames(clip, start, [moment])
+    img = cv2.imread(frames[moment]) if moment in frames else None
+    clip_fetch.prune(clips_dir)
+    if img is None:
+        return None, "no frame at the timestamp"
+    text = vlm_describe.describe(img)
+    return (text, None) if text else (None, "no description")
+
+
+def _on_demand_summary(console_host, mac_nosep, task_body):
+    """RequestAI visionToLanguage: describe the frame at payload.timestamp and POST
+    {"description": text} to resUrl. That is Protect's camera-upload callback, which resolves
+    the waiting request with the body only when Content-Type is exactly application/json
+    (M/854445:82-90) and then parses {description: string} (M/309156:18, 50-52) -- not the
+    {model, result} wrapper the :7788 models get. Failures send {"error": ...}, which fails
+    that parse, so Protect reports the summary as failed instead of waiting out 15 s."""
+    res_url = task_body.get("resUrl")
+    payload = task_body.get("payload") or {}
+    try:
+        text, error = _summarize_clip(console_host, mac_nosep, payload)
+    except Exception as e:  # noqa: BLE001 -- Protect is waiting for an answer
+        log.warning("on-demand summary failed: %r", e)
+        text, error = None, "summary failed"
+    reply = {"description": text} if text else {"error": error}
+    log.info("on-demand summary camera %s at %s: %s", payload.get("cameraId"),
+             payload.get("timestamp"), reply)
+    if not res_url:
+        log.warning("on-demand summary had no resUrl, nothing to post")
+        return
+    url = _abs_url(console_host, res_url)
+    try:
+        resp = requests.post(url, data=json.dumps(reply),
+                             headers={**_callback_headers(mac_nosep),
+                                      "Content-Type": "application/json"},
+                             cert=(CERT_PATH, KEY_PATH), verify=False, timeout=15)
+        log.info("POST %s -> %s: %s", url, resp.status_code, resp.text[:300])
+    except requests.RequestException as e:
+        log.warning("POST %s failed: %r", url, e)
 
 
 def _video_objects(body, frames):
@@ -667,30 +1636,53 @@ def _recognize_images(console_host, mac_nosep, body):
     return result
 
 
-def _post_recognize_result(console_host, mac_nosep, res_url, camera_id, event_id, result=None):
-    """POST our RAM/recognize-anything result to resUrl.
+def _post_recognize_result(console_host, mac_nosep, res_url, camera_id, event_id, result=None,
+                           parts=None, images=None):
+    """POST our recognize-anything result to resUrl.
 
-    CONFIRMED from the real firmware's syswrapper.sh: this is multipart/form-data
-    with the JSON under form field ``ram`` (optionally with per-tracker JPEG
-    fields), not a plain JSON POST. `result` is a ramInferenceSchema dict from
-    ram_tagger.build_result, or None for the placeholder.
+    CONFIRMED from the real firmware's syswrapper.sh: this is multipart/form-data with the
+    JSON under form field ``ram`` (optionally with per-tracker JPEG fields), not a plain JSON
+    POST. `result` is a ramInferenceSchema dict from ram_tagger.build_result, or None.
+    `parts` adds other JSON parts by field name (e.g. {"face": ..., "lpr": ...}) and
+    `images` per-tracker JPEGs ({trackerID: jpeg_bytes}, field str(trackerID)).
+
+    Protect validates each JSON part against its schema and rejects the whole multipart if
+    any fails, or if their eventIds differ (Protect M/761379:343-375), so every part gets
+    this task's eventId. There is no placeholder ram any more: one without `description`
+    failed ramInferenceSchema (M/315148) and took face/lpr down with it. Without a RAM
+    result the ram part is left out and Protect keys the save on lpr/face's eventId
+    instead (M/618986:51). With no JSON part at all nothing is POSTed: an empty upload has
+    no eventId, so Protect's save returns before touching the task (M/618986:46-55) -- the
+    POST would change nothing, and the task simply times out on Protect's side as before.
     """
     if not res_url:
         log.warning("recognizeKeyFrames task had no resUrl, nothing to post")
         return
+    json_parts = {}
+    for name, part in (("ram", result), *((parts or {}).items())):
+        if not part:
+            continue
+        part = dict(part)
+        if part.get("eventId") not in (None, event_id):
+            log.warning("%s part for event %s carried eventId %r; replacing it",
+                        name, event_id, part["eventId"])
+        part["eventId"] = event_id
+        json_parts[name] = part
+    if not json_parts:
+        log.info("event %s: no ram/face/lpr result; nothing to POST to %s", event_id, res_url)
+        return
     url = res_url if res_url.startswith("http") else \
         f"https://{console_host}:{CONSOLE_INTERNAL_API_PORT}{res_url}"
-    ram = result or {
-        "cameraId": camera_id,
-        "eventId": event_id,
-        "status": "success",
-        "keyMomentsTags": [],
-    }
-    files = {"ram": ("ram.json", json.dumps(ram), "application/json")}
+    files = {name: (f"{name}.json", json.dumps(part), "application/json")
+             for name, part in json_parts.items()}
+    for tracker_id, jpeg in (images or {}).items():
+        if jpeg:
+            files[str(tracker_id)] = (f"{tracker_id}.jpg", jpeg, "image/jpeg")
     try:
         resp = requests.post(url, headers=_callback_headers(mac_nosep), files=files,
                              cert=(CERT_PATH, KEY_PATH), verify=False, timeout=15)
-        log.info("POST %s -> %s: %s", url, resp.status_code, resp.text[:2000])
+        log.info("POST %s [%s] -> %s: %s", url, ", ".join(files), resp.status_code,
+                 resp.text[:2000])
     except requests.RequestException as e:
         log.warning("POST %s failed: %r", url, e)
 
@@ -759,9 +1751,67 @@ def run(host: str, port: int, token: str, send_token_header: bool, device_info: 
         log.info(">>> sent getConsoleInfo request id=%s", req_id)
 
         try:
+            _send_time_sync(ws)
+            threading.Thread(target=_time_sync_loop, args=(ws, stop_watch), daemon=True,
+                             name="diykey-timesync").start()
             _consume(ws, device_info)
         finally:
             stop_watch.set()
+
+
+# Firmware ucpv4_time_sync_monitor sends request action "timeSync" body {"t0":<ms>}
+# (ui-websocketd format string {"t0":%ld%03ld}); Protect's devices.timeSync handler answers
+# the same id with {t0, t1: Protect's receive Date.now(), t2: its send Date.now()}
+# (M/322759_timeSync.js, routed from M/188339 devices.websockets:211-219). The poll
+# interval is not in the binary's strings; DIYKEY_TIMESYNC_S (default 60) stands in.
+_time_sync_pending = {}  # request id -> t0 ms; drained by _on_time_sync_response
+_time_sync_lock = threading.Lock()
+
+
+def _send_time_sync(ws):
+    req_id = str(uuid.uuid4())
+    t0 = int(time.time() * 1000)
+    with _time_sync_lock:
+        _time_sync_pending[req_id] = t0
+        if len(_time_sync_pending) > 8:  # unanswered ones must not pile up
+            _time_sync_pending.pop(next(iter(_time_sync_pending)))
+    ws.send(pack_message({"timestamp": t0, "type": "request", "action": "timeSync",
+                          "id": req_id}, {"t0": t0}))
+
+
+def _on_time_sync_response(head, body):
+    """True when `head` answers one of our timeSync requests (then logs the NTP-style offset:
+    positive = Protect's clock ahead of ours); other responses (getConsoleInfo) fall through."""
+    with _time_sync_lock:
+        t0 = _time_sync_pending.pop(head.get("id"), None)
+    if t0 is None:
+        return False
+    t3 = int(time.time() * 1000)
+    try:
+        t1, t2 = float(body["t1"]), float(body["t2"])
+    except (KeyError, TypeError, ValueError):
+        log.debug("timeSync response without t1/t2: %s", body)
+        return True
+    offset = ((t1 - t0) + (t2 - t3)) / 2
+    delay = (t3 - t0) - (t2 - t1)
+    log.debug("timeSync: offset %+.0f ms, round trip %.0f ms", offset, delay)
+    global _time_sync_warned
+    if abs(offset) > 2000 and not _time_sync_warned:
+        _time_sync_warned = True
+        log.info("timeSync: clock differs from the console by %+.1f s", offset / 1000)
+    return True
+
+
+_time_sync_warned = False
+
+
+def _time_sync_loop(ws, stop_event):
+    interval = max(1.0, _env_number("DIYKEY_TIMESYNC_S", 60, float))
+    while not stop_event.wait(interval):
+        try:
+            _send_time_sync(ws)
+        except Exception:  # noqa: BLE001 -- the connection is closing
+            return
 
 
 def _consume(ws, device_info):
@@ -777,20 +1827,34 @@ def _consume(ws, device_info):
         body = records[1][2]
 
         if head.get("type") == "response":
+            if _on_time_sync_response(head, body):
+                continue
             log.info("<<< response to our request id=%s errorCode=%s body=%s",
                      head.get("id"), head.get("errorCode"), body)
             continue
 
-        reply_body = handle_action(head, body, device_info)
+        error = None
+        try:
+            reply_body = handle_action(head, body, device_info)
+        except ActionError as e:
+            reply_body, error = {}, e
         if head.get("id"):
-            reply = pack_message(
-                {"timestamp": int(time.time() * 1000), "type": "response",
-                 "action": head.get("action"), "id": head["id"], "errorCode": 0},
-                reply_body,
-            )
+            reply_head = {"timestamp": int(time.time() * 1000), "type": "response",
+                          "action": head.get("action"), "id": head["id"], "errorCode": 0}
+            if error:
+                reply_head.update(errorCode=error.code, error=error.message)
+            reply = pack_message(reply_head, reply_body)
             ws.send(reply)
             log.info(">>> replied to action=%s id=%s body=%s",
                      head.get("action"), head["id"], reply_body)
+        if _reset_pending.is_set():
+            _reset_pending.clear()
+            log.info("closing ucp4 connection after %s", head.get("action"))
+            try:
+                ws.close()
+            except Exception:  # noqa: BLE001
+                pass
+            return
 
 
 def _split_host_port(host_port, default_port=7442):
@@ -798,6 +1862,27 @@ def _split_host_port(host_port, default_port=7442):
         host, port_s = str(host_port).rsplit(":", 1)
         return host, int(port_s)
     return str(host_port), default_port
+
+
+def advanced_alarm_gaps(env=None):
+    """What AI Key Advanced alarms (Alarm Manager natural-language rules) lack, by env name.
+    Protect parses each rule sentence once over nl-search into txtEmbed + ramTagIds
+    (M/253677_aiprocessors.js:17-45), then on every RAM save matches only objects that carry
+    an embedding (M/12387_aiprocessors.js:213-231) and share a tag id with the rule
+    (M/718745_aiprocessors.js:23,33). So it needs: CLIP (imgEmbed and txtEmbed), the RAM
+    detector (thumbnailTags at all), Protect's tag list (query tags it won't drop; the
+    built-in list is a safe subset) and the nl-search socket (NL_PARSE)."""
+    env = os.environ if env is None else env
+    missing = []
+    if (env.get("DIYKEY_CLIP") or "0") != "1":
+        missing.append("DIYKEY_CLIP=1")
+    if not (env.get("DIYKEY_RAM_MODEL") or "").strip():
+        missing.append("DIYKEY_RAM_MODEL")
+    if not (env.get("DIYKEY_RAM_TAGS") or "").strip():
+        missing.append("DIYKEY_RAM_TAGS")
+    if (env.get("DIYKEY_NL_SEARCH") or "1") == "0":
+        missing.append("DIYKEY_NL_SEARCH (set to 0)")
+    return missing
 
 
 def main():
@@ -843,6 +1928,10 @@ def main():
         "sysid": f"0x{config.sysid_int(cfg):04x}",
     }
 
+    missing = advanced_alarm_gaps()
+    if missing:
+        log.warning("AI Key Advanced alarms (natural-language Alarm Manager rules) won't fire "
+                    "reliably -- missing: %s", ", ".join(missing))
     if clip_embed.enabled():
         # Load CLIP now: the first query would otherwise wait ~10 s for it.
         threading.Thread(target=clip_embed.text_embed, args=("warm up",), daemon=True).start()
@@ -850,8 +1939,7 @@ def main():
         threading.Thread(target=_nl_search_loop, args=(args.fallback_host_port, device_info),
                          daemon=True).start()
 
-    # Tokens are single-use: send X-Token only the first time a value is seen.
-    used_tokens = set()
+    used_tokens = _used_tokens
     backoff = 2
 
     while True:
@@ -878,12 +1966,19 @@ def main():
         if token is not None and not send_token:
             log.info("token already used on a prior connection -- reconnecting tokenless "
                      "(fingerprint should already be pinned)")
+        _reset_pending.clear()
         try:
             run(host, port, token, send_token, device_info, adopted=adopted)
+            if not config.is_adopted(STATE_DIR):
+                log.info("ucp4 connection closed after factory reset; waiting for a fresh adopt POST")
+                continue
             log.warning("ucp4 connection closed cleanly by peer; reconnecting in 3s")
             backoff = 2
             time.sleep(3)
         except Exception as e:
+            if not config.is_adopted(STATE_DIR):
+                log.info("ucp4 connection ended after un-adopt (%r); waiting for a fresh adopt POST", e)
+                continue
             log.warning("connection ended: %r -- reconnecting in %ds", e, backoff)
             time.sleep(backoff)
             backoff = min(backoff * 2, 30)
