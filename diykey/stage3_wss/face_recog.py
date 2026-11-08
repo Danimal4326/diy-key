@@ -46,6 +46,11 @@ FACE_SCORE_THRESH = float(os.environ.get("DIYKEY_FACE_THRESH") or 0.8)
 # real faces 6.7-8.8: pi-port live 12:36-12:40 on Driveway); don't send them, a weak
 # embedding makes a bad cluster in Protect. 0 keeps them all.
 FACE_EMBED_MIN_NORM = float(os.environ.get("DIYKEY_FACE_EMBED_MIN_NORM") or 7.0)
+# Narrowest face (frame pixels) worth sending. Live 2026-11-08 17:07 on Backyard a 19-22 px face
+# scored 0.83, went up at 80% and Protect filed it as a new unmatched subject: SFace expects
+# 112 px, so that much enlargement leaves no identity. The firmware gates on model-based quality
+# instead (VerifyFaceQuality, EstimateFaceQuality); this approximates it. 0 keeps them all.
+FACE_MIN_PX = int(os.environ.get("DIYKEY_FACE_MIN_PX") or 40)
 # Faces sit in the top of a person box; search only this fraction of it (pi-port top_frac).
 PERSON_TOP_FRAC = 0.6
 # Person box grown by this factor before the search: the key frame can lag the box a little
@@ -301,13 +306,14 @@ def build_face_result(camera_id, event_id, frames, person_meta, start_ms=None, i
             bx2, by2 = min(iw, int((fc[0] + fc[2]) * iw / COORD_END)), \
                 min(ih, int((fc[1] + fc[3]) * ih / COORD_END))
             pre_s += time.monotonic() - tp
-            if bx2 - bx1 < 20 or by2 - by1 < 20:
+            if bx2 - bx1 < max(20, FACE_MIN_PX) or by2 - by1 < 20:
                 continue
             ti = time.monotonic()
             emb, box = None, (bx1, by1, bx2 - bx1, by2 - by1)
             try:
                 found = [f for f in (infer(frame[y1:y2, x1:x2]) or [])
-                         if f[0][2] > 0 and f[0][3] > 0 and not weak_embedding(f[2])]
+                         if f[0][2] >= max(1, FACE_MIN_PX) and f[0][3] > 0
+                         and not weak_embedding(f[2])]
                 if found:
                     (dx, dy, dw, dh), _, emb = max(found, key=lambda f: f[1] * f[0][2] * f[0][3])
                     box = (x1 + dx, y1 + dy, dw, dh)
@@ -356,7 +362,7 @@ def build_face_result(camera_id, event_id, frames, person_meta, start_ms=None, i
         infer_s += time.monotonic() - ti
         top = None
         for (fx, fy, fw, fh), score, emb in found:
-            if fw <= 0 or fh <= 0 or weak_embedding(emb):
+            if fw < max(1, FACE_MIN_PX) or fh <= 0 or weak_embedding(emb):
                 continue
             q = float(score) * fw * fh
             if top is None or q > top[0]:

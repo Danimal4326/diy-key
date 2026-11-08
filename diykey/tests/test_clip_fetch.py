@@ -70,6 +70,33 @@ class TestClipFetch(unittest.TestCase):
         self.assertEqual(remaining_mp4, {"e3.mp4", "e4.mp4"})
         self.assertFalse(os.path.exists(e0_dir))
 
+    def test_clip_start_prefers_header(self):
+        url = "/x?start=1000&end=31000&format=mp4"
+        self.assertEqual(clip_fetch.clip_start(url, "500", "c", probe=lambda p: 35000),
+                         (500, "x-start-timestamp"))
+
+    def test_clip_start_from_duration(self):
+        # Live 07:54 Backyard: 31.3 s window, 35.5 s clip -> the clip began ~4 s early.
+        url = "/x?start=1794142489480&end=1794142520817&format=mp4"
+        self.assertEqual(clip_fetch.clip_start(url, None, "c", probe=lambda p: 35467),
+                         (1794142520817 - 35467, "end - duration"))
+        self.assertEqual(clip_fetch.clip_start(url, "0", "c", probe=lambda p: 20000),
+                         (1794142489480, "request start"))
+
+    def test_extract_frames_seeks_from_saved_start(self):
+        import subprocess
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as d:
+            clip = os.path.join(d, "e.mp4")
+            open(clip, "w").close()
+            with open(clip + ".start", "w") as f:
+                f.write("6000")
+            with mock.patch.object(subprocess, "run") as run:
+                run.return_value = subprocess.CompletedProcess([], 1, "", "x")
+                clip_fetch.extract_frames(clip, 10000, [12000])
+            args = run.call_args[0][0]
+            self.assertEqual(args[args.index("-ss") + 1], "6.000")
+
     def test_prune_missing_dir(self):
         clip_fetch.prune('/nonexistent/dir/xyz')
 

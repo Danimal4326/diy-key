@@ -8,15 +8,23 @@ tags come from a COCO object detector (an Ultralytics-style anchor-free ONNX
 export, [1, 84, N] output, e.g. Frigate's yolov9-s-320.onnx), plus "night"
 for IR (greyscale) frames. COCO names are already vocabulary tags except the
 ones mapped or dropped below.
+
+DIYKEY_RAM_PLUS_MODEL (path to an ONNX export of RAM++, Recognize Anything Plus, Apache-2.0)
+adds the attributes COCO has no class for (gender, clothing, accessories, sedan/SUV...): see
+RamPlus. COCO still supplies the boxes and its tags; RAM++ runs on the whole frame and on every
+person/vehicle crop and its tags are merged in.
 """
 import ast
 import logging
+import os
+import threading
 import time
 
 import cv2
 import numpy as np
 
 import clip_embed
+import reid_model
 
 log = logging.getLogger("diykey.ram")
 
@@ -42,9 +50,141 @@ ATTR_TO_RAM = {"grey": "gray", "bike": "bicycle"}
 UMBRELLA = {"person": "person", "vehicle": "vehicle", "animal": "animal"}
 
 
-class RamTagger:
-    def __init__(self, model_path, conf=0.35, iou=0.5):
+# RAM++ tags only meaningful on one kind of object: dropped from crops of another kind (a "man"
+# on a car crop is the driver behind the glass; Protect would file the car under gender:male).
+PLUS_PERSON_ONLY = {"man", "woman", "boy", "girl"}
+PLUS_VEHICLE_ONLY = {"sedan", "suv", "truck", "van", "bus", "motorcycle", "bicycle", "pickup truck",
+                     "minivan", "taxi", "limo"}
+# Used when DIYKEY_RAM_TAGS is unset: the RAM++ tags Protect's convertRamTagsToLabels turns into a
+# Find Anything filter (gender, clothing type, accessory, vehicle type), all enabled rows of
+# ram_tags.csv on 7.3.70 (587258_convertRamTagsToLabels.js, 594367_*.js).
+PLUS_FALLBACK_VOCAB = frozenset({
+    "man", "woman", "boy", "girl", "shirt", "hoodie", "coat", "suit", "pant", "short", "skirt",
+    "glasses", "hat", "backpack", "handbag", "helmet", "mask", "sedan", "suv", "truck", "van",
+    "bus", "motorcycle", "bicycle", "person", "car", "dog", "cat", "bird", "night",
+})
+
+
+def _protect_vocab():
+    """Enabled tag names of Protect's ram_tags.csv (DIYKEY_RAM_TAGS), or the fallback set."""
+    path = os.path.expanduser(os.environ.get("DIYKEY_RAM_TAGS") or "")
+    names = set()
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                parts = line.rstrip("\r\n").split("\t")
+                if len(parts) >= 3 and parts[2].strip().lower() == "true":
+                    names.add(parts[1].strip().lower())
+    except OSError:
+        pass
+    return names or set(PLUS_FALLBACK_VOCAB)
+
+
+class RamPlus:
+    """RAM++ (swin-L, 384x384) image tagging from an ONNX export: image [1,3,384,384] (RGB,
+    ImageNet-normalised) -> sigmoid probabilities [1, 4585], one per tag of ram_plus_tags.txt.
+    Next to the model: ram_plus_tags.txt (RAM++'s ram_tag_list.txt) and ram_plus_thresholds.txt
+    (its ram_tag_list_threshold.txt, one per-class threshold per line; a tag is output when its
+    probability exceeds its own threshold, not a global one). Lazy: the session loads on first use
+    (CoreML on Apple Silicon, else CPU), under one lock. Names are lowercased and only tags that
+    are enabled rows of Protect's ram_tags.csv are kept."""
+    SIZE = 384
+    MEAN = np.array([0.485, 0.456, 0.406], np.float32)
+    STD = np.array([0.229, 0.224, 0.225], np.float32)
+
+    def __init__(self, model_path, vocab=None, max_tags=None):
+        self.model_path = os.path.expanduser(model_path)
+        self.vocab = vocab
+        self.max_tags = int(max_tags if max_tags is not None
+                            else os.environ.get("DIYKEY_RAM_PLUS_MAX") or 16)
+        self._lock = threading.Lock()
+        self._session = None
+        self._failed = False
+
+    def _load(self):
         import onnxruntime as ort
+        d = os.path.dirname(self.model_path)
+        with open(os.path.join(d, "ram_plus_tags.txt"), encoding="utf-8") as f:
+            names = [ln.strip().lower() for ln in f.read().splitlines()]
+        with open(os.path.join(d, "ram_plus_thresholds.txt"), encoding="utf-8") as f:
+            thr = [float(ln) for ln in f.read().split()]
+        if len(thr) != len(names):
+            raise ValueError(f"{len(names)} RAM++ tags but {len(thr)} thresholds")
+        vocab = self.vocab if self.vocab is not None else _protect_vocab()
+        self.names, self.thresholds = names, np.array(thr, np.float32)
+        self.keep = np.array([n in vocab for n in names])
+        provs = ["CPUExecutionProvider"]
+        if os.environ.get("DIYKEY_RAM_PLUS_PROVIDER", "coreml").lower() == "coreml" \
+                and "CoreMLExecutionProvider" in ort.get_available_providers():
+            provs.insert(0, ("CoreMLExecutionProvider", {
+                "ModelFormat": "MLProgram", "MLComputeUnits": "ALL",
+                "ModelCacheDirectory": os.path.join(d, ".coreml_cache")}))
+        self._session = ort.InferenceSession(self.model_path, providers=provs)
+        log.info("RAM++: %s (%s, %d of %d tags in Protect's vocabulary)", self.model_path,
+                 self._session.get_providers()[0], int(self.keep.sum()), len(names))
+
+    def _prep(self, img_bgr):
+        h, w = img_bgr.shape[:2]
+        interp = cv2.INTER_AREA if max(h, w) > self.SIZE else cv2.INTER_LINEAR
+        x = cv2.resize(cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB), (self.SIZE, self.SIZE),
+                       interpolation=interp).astype(np.float32) / 255
+        return ((x - self.MEAN) / self.STD).transpose(2, 0, 1)[None]
+
+    def tags(self, img_bgr):
+        """{tag: probability} for one image: tags above their per-class threshold that Protect
+        knows, best max_tags by probability. {} when the model cannot load."""
+        with self._lock:
+            if self._failed:
+                return {}
+            try:
+                if self._session is None:
+                    self._load()
+                probs = self._session.run(None, {self._session.get_inputs()[0].name:
+                                                 self._prep(img_bgr)})[0][0]
+            except Exception as e:  # noqa: BLE001 -- RAM++ is an extra; COCO tags still go out
+                log.warning("RAM++ failed (%r); disabled", e)
+                self._failed = True
+                return {}
+        hit = np.nonzero(self.keep & (probs > self.thresholds))[0]
+        hit = hit[np.argsort(-probs[hit])][:self.max_tags]
+        return {self.names[i]: float(probs[i]) for i in hit}
+
+
+# Words Protect's convertRamTagsToLabels turns into a filter label (594367_*.js lists), optionally
+# behind a colour: gender, clothing types, accessories, vehicle types.
+_LABEL_NOUNS = {"man", "boy", "woman", "girl", "shirt", "hoodie", "coat", "suit", "skirt", "pant",
+                "short", "glasses", "glass", "hat", "backpack", "handbag", "helmet", "mask",
+                "bike", "motorcycle", "sedan", "suv", "truck", "van", "bus", "clothing"}
+_LABEL_COLOURS = {"red", "orange", "yellow", "green", "blue", "purple", "pink", "brown", "black",
+                  "white", "gray", "grey"}
+
+
+def label_tag(tag):
+    """True when Protect maps this tag to a Find Anything label (or it is an umbrella tag)."""
+    first, _, rest = tag.partition(" ")
+    noun = rest if first in _LABEL_COLOURS else tag
+    return noun in _LABEL_NOUNS or tag in UMBRELLA.values()
+
+
+def plus_filter(plus_tags, object_type):
+    """RAM++ tags that fit a crop of this Protect object type (see PLUS_PERSON_ONLY). On a
+    person/vehicle/animal crop only label-producing tags survive: live 2026-11-07 doorbell person
+    crop got oven/food/baker/tray, which would pollute Find Anything."""
+    out = {t: v for t, v in plus_tags.items() if label_tag(t)} if object_type else dict(plus_tags)
+    if object_type and object_type != "person":
+        for t in PLUS_PERSON_ONLY:
+            out.pop(t, None)
+    if object_type and object_type != "vehicle":
+        for t in PLUS_VEHICLE_ONLY:
+            out.pop(t, None)
+    return out
+
+
+class RamTagger:
+    def __init__(self, model_path, conf=0.35, iou=0.5, plus_path=None):
+        import onnxruntime as ort
+        plus_path = plus_path if plus_path is not None else os.environ.get("DIYKEY_RAM_PLUS_MODEL")
+        self.plus = RamPlus(plus_path) if plus_path else None
         self.session = ort.InferenceSession(model_path, providers=["CPUExecutionProvider"])
         inp = self.session.get_inputs()[0]
         self.input_name = inp.name
@@ -79,13 +219,17 @@ class RamTagger:
         return [(self.labels.get(int(cls[i]), str(int(cls[i]))), float(best[i]), tuple(rects[i]))
                 for i in np.array(idx).flatten()]
 
-    def tag_frame(self, img_bgr):
-        """[{tag, confScore}] for one frame, best score per tag."""
+    def tag_frame(self, img_bgr, plus=True):
+        """[{tag, confScore}] for one frame, best score per tag. plus=False leaves RAM++ out
+        (tag_crop runs it itself, after the family filter)."""
         found = {}
         for label, score, _ in self.detect(img_bgr):
             tag = COCO_TO_RAM.get(label, label)
             if tag and score > found.get(tag, 0):
                 found[tag] = score
+        if self.plus and plus:
+            for tag, score in self.plus.tags(img_bgr).items():
+                found[tag] = max(found.get(tag, 0), score)
         if is_greyscale(img_bgr):
             found[NIGHT_TAG] = 0.9
         return [{"tag": t, "confScore": round(s, 3)}
@@ -111,12 +255,21 @@ def tag_crop(tagger, img_bgr, hint):
     attrs = hint.get("attributes") or {}
     family_tags = {COCO_TO_RAM.get(lbl, lbl) for lbl in family or ()}
     found = {}
-    for t in tagger.tag_frame(img_bgr):
+    plus = getattr(tagger, "plus", None)
+    for t in (tagger.tag_frame(img_bgr, plus=False) if plus else tagger.tag_frame(img_bgr)):
         if t["tag"] == NIGHT_TAG or family is None:
             found[t["tag"]] = t["confScore"]
         elif t["tag"] in family_tags and not (attrs.get("vehicleType") or {}).get("val") \
                 and not any(k in family_tags for k in found):
             found[t["tag"]] = t["confScore"]  # one object: only the best label of its family
+    if plus:
+        # RAM++ on the crop: gender, clothing, accessories, vehicle body type. Added after the
+        # family filter above (which exists to stop COCO's wrong-class guesses on crops).
+        extra = plus_filter(plus.tags(img_bgr), object_type)
+        if (attrs.get("vehicleType") or {}).get("val"):  # the camera already named the body type
+            extra = {t: v for t, v in extra.items() if t not in PLUS_VEHICLE_ONLY}
+        for tag, score in extra.items():
+            found[tag] = max(found.get(tag, 0), round(score, 3))
     for key in ("vehicleType", "color"):
         val = (attrs.get(key) or {}).get("val")
         if val:
@@ -166,9 +319,12 @@ def crop_box(img, coord, margin=0.1):
 
 def thumbnail_tags(tagger, objects):
     """thumbnailTags for tracked objects: [{trackerID, keyMomentMs, img, hint}] ->
-    [{trackerID, keyMomentMs, tags, imgEmbed?}]. Protect stores an object's row in the AI
-    Key's ramDetections (what search queries) only when it carries imgEmbed, matched to the
-    smart-detect object by trackerId and keyMomentMs == detectedAt."""
+    [{trackerID, keyMomentMs, tags, imgEmbed?, reidEmbed?}]. Protect stores an object's row in
+    the AI Key's ramDetections (what search queries) only when it carries imgEmbed, matched to
+    the smart-detect object by trackerId and keyMomentMs == detectedAt. reidEmbed is what
+    tap-to-find searches (ramDetections.reidEmbedding, M/499374:40); the firmware fills it for
+    one object class only (FUN_0030d234 `*param_4 == 1`, infer agent 0.0.24.4) and its segmenter
+    is person-only (trt_engine.py class_pred), so people only here too."""
     out = []
     for o in objects:
         if o.get("img") is None:
@@ -181,8 +337,12 @@ def thumbnail_tags(tagger, objects):
         emb = clip_embed.blend(clip_embed.image_embed(o["img"]), [t["tag"] for t in entry["tags"]])
         if emb:
             entry["imgEmbed"] = emb
-        umbrella = UMBRELLA.get(str(hint.get("objectType") or (hint.get("attributes") or {})
-                                    .get("objectType") or "").lower())
+        obj_type = str(hint.get("objectType") or (hint.get("attributes") or {})
+                       .get("objectType") or "").lower()
+        reid = reid_model.embed(o["img"]) if obj_type == "person" else None
+        if reid:
+            entry["reidEmbed"] = reid
+        umbrella = UMBRELLA.get(obj_type)
         if umbrella and all(t["tag"] != umbrella for t in entry["tags"]):
             entry["tags"].append({"tag": umbrella,
                                   "confScore": round((hint.get("confidence") or 50) / 100, 3)})
@@ -190,7 +350,6 @@ def thumbnail_tags(tagger, objects):
     return out
 
 
-SNAPSHOT_TYPES = {"person", "vehicle", "animal", "face", "licensePlate"}
 
 
 def _roi_list(roi_meta, ms):
@@ -205,38 +364,22 @@ def _roi_list(roi_meta, ms):
     return out
 
 
-def _snapshot_type(roi):
-    for v in ((roi.get("attributes") or {}).get("objectType"), roi.get("objectType")):
-        if v in SNAPSHOT_TYPES:
-            return v
-    return None
-
-
-def build_result(tagger, camera_id, event_id, frames, pre_ms=0, hints=None, objects=None):
+def build_result(tagger, camera_id, event_id, frames, pre_ms=0, hints=None, objects=None,
+                 roi_meta=None):
     """recognizeKeyFrames result (ramInferenceSchema) from {moment_ms: jpeg_path}; hints maps
-    moment_ms -> the image entry when the frame is a crop of one object (image tasks)."""
-    return _build(tagger, camera_id, event_id, frames, pre_ms, hints, objects)[0]
+    moment_ms -> the image entry when the frame is a crop of one object (image tasks).
 
+    With roiMeta each key moment also carries tagObjs, that moment's roi list verbatim
+    (SW:2737-2760; not in ramInferenceSchema M/315148:75, so firmware parity only).
 
-def build_result_with_images(tagger, camera_id, event_id, frames, pre_ms=0, hints=None,
-                             objects=None, roi_meta=None):
-    """-> (result, {str(trackerID): jpeg bytes}). Like build_result, plus what the firmware adds
-    when the request carries roiMeta (SW:2737-2760): keyMomentsTags[].tagObjs (that key
-    moment's roi list, verbatim) and keyMomentsTags[].searchSnapshots (one snapshotSchema per
-    roi with a trackerId and a person/vehicle/animal type). Upload each JPEG as multipart part
-    named str(trackerID) next to the `ram` JSON part (SW:4062-4070 keys parts by trackerID,
-    the same way it does for face/lpr). Protect keys the thumbnail map on
-    [trackerID, clockBestWall] (M/499374:23-31) and saves one thumbnail per searchSnapshots
-    entry from the part body (M/12387:244-262), so clockBestWall == keyMomentMs, which is also
-    what thumbnailTags match on. tagObjs is NOT in ramInferenceSchema (M/315148:75; zod drops
-    it), so it is firmware parity only; searchSnapshots is what Protect reads. The JPEG is the
-    roi's crop of the frame, or the whole frame when the box is unusable."""
-    return _build(tagger, camera_id, event_id, frames, pre_ms, hints, objects, roi_meta)
-
-
-def _build(tagger, camera_id, event_id, frames, pre_ms, hints, objects, roi_meta=None):
+    Never sends keyMomentsTags[].searchSnapshots. ubnt_ai_infer_agent 0.0.24.4 (fw 2.2.8)
+    RunRecognizeAnything sets tags and tagObjs on each key moment but never that field; its
+    only writer is the JSON loader, and /tmp/snapshots crops are face/LPR/pose only, so the
+    upload loop at SW:4062-4070 has nothing to send. Protect turns every entry into a NEW
+    smartDetectObject (M/12387:244-262): live 2026-11-08 07:55 on Backyard one walker became
+    two person detections with one trackerId, and 16:18 on Doorbell a parked car became three
+    tiles. Tracked objects are tagged through thumbnailTags only."""
     t0 = time.monotonic()
-    images = {}
     key_moments, merged = [], {}
     for ms in sorted(frames):
         img = cv2.imread(frames[ms])
@@ -249,30 +392,13 @@ def _build(tagger, camera_id, event_id, frames, pre_ms, hints, objects, roi_meta
         rois = _roi_list(roi_meta, ms)
         if rois:
             km["tagObjs"] = rois
-            snaps = []
-            for roi in rois:
-                typ, tid = _snapshot_type(roi), roi.get("trackerId", roi.get("trackerID"))
-                if typ is None or not isinstance(tid, int) or str(tid) in images:
-                    continue
-                crop = crop_box(img, roi["coord"]) if len(roi.get("coord") or ()) >= 4 else None
-                ok, buf = cv2.imencode(".jpg", img if crop is None else crop)
-                if not ok:
-                    continue
-                images[str(tid)] = buf.tobytes()
-                snaps.append({"clockBestMonotonic": int(ms), "clockBestWall": int(ms),
-                              "smartDetectHeatmap": "",
-                              "smartDetectSnapshot": f"/tmp/{camera_id}_{tid}.jpg",
-                              "smartDetectSnapshotName": "", "smartDetectSnapshotType": typ,
-                              "trackerID": tid})
-            if snaps:
-                km["searchSnapshots"] = snaps
         key_moments.append(km)
         for t in tags:
             merged[t["tag"]] = max(merged.get(t["tag"], 0), t["confScore"])
     thumbs = thumbnail_tags(tagger, objects or [])
     infer_ms = int((time.monotonic() - t0) * 1000)
     all_tags = [{"tag": t, "confScore": s} for t, s in sorted(merged.items(), key=lambda kv: -kv[1])]
-    return ({
+    return {
         "cameraId": camera_id,
         "eventId": event_id,
         "status": "success",
@@ -284,4 +410,4 @@ def _build(tagger, camera_id, event_id, frames, pre_ms, hints, objects, roi_meta
         "inferTxtMs": 0,
         "preProcessMs": int(pre_ms),
         "timeElapsedMs": int(pre_ms) + infer_ms,
-    }, images)
+    }

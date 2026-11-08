@@ -48,6 +48,7 @@ import firmware  # noqa: E402
 import ram_tagger  # noqa: E402
 import nl_search  # noqa: E402
 import clip_embed  # noqa: E402
+import reid_model  # noqa: E402
 import second_verifier  # noqa: E402
 import face_recog  # noqa: E402
 import lpr  # noqa: E402
@@ -438,8 +439,10 @@ def ai_setting_enabled(name, default=False):
 # of events (or a retroactive-processing backfill) would otherwise fetch and tag dozens of
 # clips at once. Protect stops dispatching to a processor whose queue is over 200 (Protect
 # M/851272:100-106), so a full queue here means something is wrong; drop rather than grow.
-# Tasks that waited past DIYKEY_TASK_DROP_AGE_S are discarded when dequeued: Protect has
-# given up on them by then and the result would only be rejected.
+# Tasks that waited past DIYKEY_TASK_DROP_AGE_S (default 900 s, the "up to 15 minutes" delay
+# of a full queue in Ubiquiti's AI Key FAQ) are discarded when dequeued. Protect has not given
+# up yet: it waits 30 min for a tagging task, 3 min for describe/embeddings (M/630689:25
+# resolveTaskTimeoutMs), so a dropped tagging task stays in progress there until that timeout.
 _task_lock = threading.Lock()
 _task_q = None
 # queued/running count every task; queued_<group>/running_<group> also count the tasks of a
@@ -771,6 +774,13 @@ def handle_action(head, body, device_info):
                          args=(_on_demand_summary, device_info["console_host"],
                                device_info["mac_nosep"], body),
                          daemon=True, name="diykey-vlm-on-demand").start()
+    elif action == "RequestAI" and str((body or {}).get("targetUri") or "").endswith(
+            SEGMENT_URI):
+        # Tap-to-find (fetchSegments, M/370427). Same 15 s requestAi limit as the summary.
+        threading.Thread(target=_fast_lane_run,
+                         args=(_segment_video, device_info["console_host"],
+                               device_info["mac_nosep"], body),
+                         daemon=True, name="diykey-segment-video").start()
     elif action == "RequestAI":
         # targetUri (":7788/v1/models/<model>/inference") means "call your own
         # local gateway": there is no console callback into :7788.
@@ -1040,13 +1050,10 @@ def _handle_recognize(console_host, mac_nosep, body):
                 try:
                     # Only Protect's key moments/thumbnails: a keyMomentsTags row per extra
                     # face/plate grab would be a key moment Protect never asked about.
-                    # searchSnapshots JPEGs go up as parts named str(trackerID), like the
-                    # firmware (SW:2737-2760, 4037-4060); face/plate parts use offset ids.
-                    result, snaps = ram_tagger.build_result_with_images(
+                    result = ram_tagger.build_result(
                         tagger, camera_id, event_id, ram_frames,
                         pre_ms=(time.monotonic() - t0) * 1000,
                         objects=_video_objects(body, frames), roi_meta=body.get("roiMeta"))
-                    images.update(snaps or {})
                     log.info("event %s: %s", event_id, result["description"])
                 except Exception as e:  # noqa: BLE001
                     log.warning("RAM tagging failed for event %s: %r", event_id, e)
@@ -1354,6 +1361,7 @@ def _handle_enhance_image_group(console_host, mac_nosep, body):
 # Deep Understanding targets (Protect M/851272:196-255).
 DESCRIBE_URI = ":7968/describe"
 EMBED_URI = ":7445/generate-embeddings"
+SEGMENT_URI = ":7445/segment-video"
 DESCRIBE_MODEL = "diykey-vlm"
 
 
@@ -1458,17 +1466,17 @@ def _handle_generate_embeddings(console_host, mac_nosep, task_body):
     images:[{reqUrl, thumbnailId, objectId, ...}]}; reply POSTs {camera, event, embeddings:
     [{objectId, objectType, reidEmbed[1024], model, dim}], failed:[{objectId, reason}]} to resUrl
     (schema M/761379:376-400; saveEmbeddings M/579892:21-70 keeps only vectors for person objects
-    of that event and groups them into sessions). With DIYKEY_CLIP=1 each crop gets
-    clip_embed.reid_embed (CLIP ViT-L/14 pooled 1024-d, not the firmware's re-ID net; see there
-    for the reidCutoff caveat). Otherwise, or per crop that cannot be fetched/embedded, objects
-    are reported failed so the task completes at once instead of timing out."""
+    of that event and groups them into sessions). Each crop gets reid_model.embed, the same
+    vector space as thumbnailTags reidEmbed. Without DIYKEY_REID_MODEL, or per crop that cannot
+    be fetched/embedded, objects are reported failed so the task completes at once instead of
+    timing out."""
     import cv2
     payload = (task_body or {}).get("payload") or {}
     res_url = (task_body or {}).get("resUrl")
     if not res_url:
         return
     embeddings, failed = [], []
-    on = clip_embed.enabled() and bool(STATE_DIR)
+    on = reid_model.enabled() and bool(STATE_DIR)
     hdr, cert = _callback_headers(mac_nosep), (CERT_PATH, KEY_PATH)
     tag = re.sub(r"[^A-Za-z0-9_.-]", "_", str(payload.get("event") or "embed"))
     for i, im in enumerate(payload.get("images") or []):
@@ -1481,12 +1489,12 @@ def _handle_generate_embeddings(console_host, mac_nosep, task_body):
         path = os.path.join(STATE_DIR, "clips", "embed", f"{tag}-{i}.jpg")
         if req and clip_fetch.fetch_image(_abs_url(console_host, req), hdr, cert, path):
             try:
-                vec = clip_embed.reid_embed(cv2.imread(path))
+                vec = reid_model.embed(cv2.imread(path))
             except Exception as e:  # noqa: BLE001 -- one bad crop must not sink the task
                 log.warning("generateEmbeddings: embed failed for %s: %r", oid, e)
         if vec:
             embeddings.append({"objectId": oid, "objectType": im.get("objectType") or "person",
-                               "reidEmbed": vec, "model": clip_embed.REID_MODEL,
+                               "reidEmbed": vec, "model": reid_model.MODEL_NAME,
                                "dim": len(vec)})
         else:
             failed.append({"objectId": oid, "reason": "no crop" if not req else "embed failed"})
@@ -1499,6 +1507,78 @@ def _handle_generate_embeddings(console_host, mac_nosep, task_body):
                  len(embeddings), len(failed), url, resp.status_code)
     except requests.RequestException as e:
         log.warning("generateEmbeddings POST %s failed: %r", url, e)
+
+
+SEGMENT_MIN_CONF = 0.5  # trt_engine.py segment(conf_threshold=0.5)
+
+
+def _segment_results(tagger, img):
+    """fetchSegmentsResponseSchema results (M/370427) for the people in a frame. Coordinates are
+    0..1000 and bbox is x1,y1,x2,y2 like the firmware (trt_engine.py postprocess). The firmware
+    outlines each person with SmartSegment.engine (NVIDIA-only); here the outline is the
+    detector's box, so a tap selects the rectangle rather than the silhouette."""
+    h, w = img.shape[:2]
+    results = []
+    for label, score, (x, y, bw, bh) in tagger.detect(img):
+        if label != "person" or score < SEGMENT_MIN_CONF:
+            continue
+        x0, y0, x1, y1 = (max(0, int(x)), max(0, int(y)), min(w, int(x + bw)), min(h, int(y + bh)))
+        vec = reid_model.embed(img[y0:y1, x0:x1])
+        if not vec:
+            continue
+        box = [int(x0 * 1000 / w), int(y0 * 1000 / h), int(x1 * 1000 / w), int(y1 * 1000 / h)]
+        contour = [[box[0], box[1]], [box[2], box[1]], [box[2], box[3]], [box[0], box[3]]]
+        results.append({"embedding": vec, "bbox": box, "contour": contour, "contours": [contour],
+                        "objectType": "person"})
+    return results
+
+
+def _segment_video(console_host, mac_nosep, task_body):
+    """RequestAI :7445/segment-video (M/126498 reidentifyFrame, firmware agent.py /segment-video):
+    payload {cameraId, timestamp, videoUrl}; POST {"results": [...]} or {"error": ...} to resUrl.
+    Like the firmware, only +-1 s of the +-5 s export is fetched."""
+    import shutil
+
+    import cv2
+    payload = (task_body or {}).get("payload") or {}
+    res_url = (task_body or {}).get("resUrl")
+    if not res_url:
+        return
+    hdr, cert = _callback_headers(mac_nosep), (CERT_PATH, KEY_PATH)
+    out, clip = {"error": "Failed to download video"}, None
+    try:
+        tagger = _get_tagger()
+        ts, url = int(payload["timestamp"]), str(payload["videoUrl"])
+        if tagger is None or not reid_model.enabled() or not STATE_DIR:
+            out = {"error": "no re-ID model"}
+        else:
+            url = url.replace(f"start={ts - 5000}", f"start={ts - 1000}")
+            url = url.replace(f"end={ts + 5000}", f"end={ts + 1000}")
+            clip = clip_fetch.fetch_clip(
+                clip_fetch.mp4_url(console_host, CONSOLE_INTERNAL_API_PORT, url), hdr, cert,
+                os.path.join(STATE_DIR, "clips"), f"segment-{payload.get('cameraId')}-{ts}")
+            frames = clip_fetch.extract_frames(clip, ts - 1000, [ts]) if clip else {}
+            img = cv2.imread(frames[ts]) if ts in frames else None
+            if img is not None:
+                out = {"results": _segment_results(tagger, img)}
+    except Exception as e:  # noqa: BLE001 -- Protect is waiting on this reply
+        log.warning("segment-video failed: %r", e)
+        out = {"error": "Internal server error"}
+    finally:
+        if clip:
+            for path in (clip, clip + ".start"):
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+            shutil.rmtree(os.path.splitext(clip)[0], ignore_errors=True)
+    try:
+        resp = requests.post(_abs_url(console_host, res_url), headers=hdr, json=out, cert=cert,
+                             verify=False, timeout=15)
+        log.info("segment-video: %s -> %s", len(out.get("results", [])) if "results" in out
+                 else out["error"], resp.status_code)
+    except requests.RequestException as e:
+        log.warning("segment-video POST failed: %r", e)
 
 
 # requestAi's visionToLanguage target (Protect M/490990:11).

@@ -32,6 +32,11 @@ def meta(ts, tid, coord=(250, 100, 300, 800), obj="person"):
 
 
 class FaceResultTest(unittest.TestCase):
+    def setUp(self):  # these use small synthetic faces; FaceMinSizeTest covers the limit
+        patcher = mock.patch.object(face_recog, "FACE_MIN_PX", 0)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_schema_keys_and_types(self):
         infer = mock.Mock(return_value=[((30, 20, 40, 50), 0.9, emb(1))])
         res = face_recog.build_face_result("cam1", "ev1", {1000: frame()}, [meta(1000, 7)],
@@ -171,7 +176,33 @@ class FaceResultTest(unittest.TestCase):
                 warn.assert_not_called()
 
 
+class FaceMinSizeTest(unittest.TestCase):
+    """Live 17:07 Backyard: a 20 px face reached Protect as a smeared new subject."""
+
+    def _run(self, width):
+        def infer(crop):
+            return [((1, 1, width, width), 0.9, emb(1))]
+        return face_recog.build_face_result("c", "e", {1: frame()}, [meta(1, 3)], infer=infer)
+
+    def test_small_face_skipped(self):
+        with mock.patch.object(face_recog, "FACE_MIN_PX", 40):
+            self.assertIsNone(self._run(22))
+
+    def test_large_enough_face_kept(self):
+        with mock.patch.object(face_recog, "FACE_MIN_PX", 40):
+            self.assertIsNotNone(self._run(60))
+
+    def test_zero_disables(self):
+        with mock.patch.object(face_recog, "FACE_MIN_PX", 0):
+            self.assertIsNotNone(self._run(22))
+
+
 class FaceMetaTest(unittest.TestCase):
+    def setUp(self):  # these use small synthetic faces; FaceMinSizeTest covers the limit
+        patcher = mock.patch.object(face_recog, "FACE_MIN_PX", 0)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     """Protect's camera face boxes are used directly: no YuNet, SFace-only embed."""
 
     def test_face_box_aligned_via_yunet_in_expanded_box(self):
