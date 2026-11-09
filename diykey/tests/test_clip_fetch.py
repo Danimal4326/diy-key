@@ -4,6 +4,7 @@ import os
 import shutil
 import sys
 import tempfile
+import time
 import unittest
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -94,8 +95,46 @@ class TestClipFetch(unittest.TestCase):
             with mock.patch.object(subprocess, "run") as run:
                 run.return_value = subprocess.CompletedProcess([], 1, "", "x")
                 clip_fetch.extract_frames(clip, 10000, [12000])
-            args = run.call_args[0][0]
+            args = run.call_args_list[0][0][0]
             self.assertEqual(args[args.index("-ss") + 1], "6.000")
+
+    def test_prune_leaves_clips_a_queued_summary_may_need(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        for name, age in (("old", 5000), ("recent", 100), ("newest", 1)):
+            path = os.path.join(d, f"{name}.mp4")
+            open(path, "wb").close()
+            os.utime(path, (time.time() - age, time.time() - age))
+        clip_fetch.prune(d, keep=1, min_age_s=1200)
+        self.assertEqual(set(os.listdir(d)), {"recent.mp4", "newest.mp4"})
+
+    def _extract_past_the_end(self, last_frame_works):
+        import subprocess
+        from unittest import mock
+
+        def fake_run(args, **kw):
+            if "-sseof" in args and last_frame_works:
+                open(args[-1], "wb").close()
+            return subprocess.CompletedProcess(args, 0, "", "")
+
+        with tempfile.TemporaryDirectory() as d:
+            clip = os.path.join(d, "e.mp4")
+            open(clip, "w").close()
+            with open(clip + ".start", "w") as f:
+                f.write("1000")
+            with mock.patch.object(subprocess, "run", side_effect=fake_run) as run:
+                frames = clip_fetch.extract_frames(clip, 1000, [26000])
+            return frames, run.call_args_list
+
+    def test_key_moment_past_the_end_uses_the_last_frame(self):
+        frames, calls = self._extract_past_the_end(True)
+        self.assertEqual(list(frames), [26000])
+        self.assertIn("-sseof", calls[1][0][0])
+
+    def test_no_frame_when_the_last_frame_fails_too(self):
+        frames, calls = self._extract_past_the_end(False)
+        self.assertEqual(frames, {})
+        self.assertEqual(len(calls), 2)
 
     def test_prune_missing_dir(self):
         clip_fetch.prune('/nonexistent/dir/xyz')

@@ -480,6 +480,9 @@ def _env_number(name, default, cast=int):
         return cast(default)
 
 
+_task_ctx = threading.local()  # wait_ms: how long the worker's current task sat in the queue
+
+
 def _task_worker(q):
     drop_age = _env_number("DIYKEY_TASK_DROP_AGE_S", 900, float)
     while True:
@@ -497,6 +500,7 @@ def _task_worker(q):
             log.warning("%s task waited %.0fs (> DIYKEY_TASK_DROP_AGE_S=%.0f); dropped",
                         kind, age, drop_age)
             continue
+        _task_ctx.wait_ms = age * 1000
         try:
             fn(*args)
         except Exception:  # noqa: BLE001 -- one bad task must not kill the worker
@@ -520,11 +524,28 @@ def _task_queue():
         return _task_q
 
 
-def _submit_task(kind, fn, args, ram=False, group=None, extra_groups=()):
+_summary_q = None
+
+
+def _summary_queue():
+    """The automatic-summary queue and its one worker, started on first use. Live 2026-11-09:
+    a summary was about 30 s of each 60 s event on the only task worker, and 7 events waited
+    past DIYKEY_TASK_DROP_AGE_S and were dropped."""
+    global _summary_q
+    with _task_lock:
+        if _summary_q is None:
+            _summary_q = queue.Queue(maxsize=max(1, _env_number("DIYKEY_TASK_QUEUE_MAX", 200)))
+            threading.Thread(target=_task_worker, args=(_summary_q,), daemon=True,
+                             name="diykey-summary").start()
+        return _summary_q
+
+
+def _submit_task(kind, fn, args, ram=False, group=None, extra_groups=(), q=None):
     """Queue fn(*args); False (and a warning) when the queue is full. ram=True is
     group="ram"; a group's tasks are also counted under queued_/running_<group>.
-    extra_groups are further groups to count the task under (see _task_group)."""
-    q = _task_queue()
+    extra_groups are further groups to count the task under (see _task_group). q is the
+    queue to use, by default the main task queue."""
+    q = _task_queue() if q is None else q
     group = _task_group("ram" if ram else group) + tuple(extra_groups)
     with _task_lock:
         try:
@@ -993,6 +1014,52 @@ _tagger_lock = threading.Lock()
 _tagger_warned = False
 
 
+def _warm_one(name, fn):
+    try:
+        t0 = time.monotonic()
+        fn()
+        log.info("%s warm-up took %.1f s", name, time.monotonic() - t0)
+    except Exception as e:  # noqa: BLE001 -- the first task will load it or report it
+        log.warning("%s warm-up failed: %r", name, e)
+
+
+def _warm_models():
+    """Load every enabled model at startup, one at a time, RAM++ (the slowest) last. Live
+    2026-11-09 15:45: an on-demand summary loaded SmolVLM first, took 18 s against Protect's
+    15 s limit and got "Invalid upload token"."""
+    import cv2
+    import numpy as np
+    blank = np.zeros((256, 256, 3), np.uint8)
+    if clip_embed.enabled():
+        _warm_one("CLIP", lambda: clip_embed.text_embed("warm up"))
+    if vlm_describe.enabled():
+        _warm_one("VLM", lambda: vlm_describe.describe(blank))
+    if reid_model.enabled():
+        _warm_one("re-ID", lambda: reid_model.embed(blank))
+    if _truthy(os.environ.get("DIYKEY_FACE")):
+        _warm_one("face", lambda: (face_recog._models.infer_fn() or (lambda _: None))(blank))
+    if _truthy(os.environ.get("DIYKEY_FACE_ENHANCE")):
+        _warm_one("face enhance",
+                  lambda: face_enhance.enhance(cv2.imencode(".jpg", blank)[1].tobytes()))
+    if _truthy(os.environ.get("DIYKEY_LPR")) and lpr.lpr_available():
+        _warm_one("LPR", lambda: lpr._alpr_reader(blank))
+    _warm_ram_plus()
+
+
+def _warm_ram_plus():
+    """Load RAM++ at startup with one blank frame, so the first event doesn't pay for it. Live
+    2026-11-09: 1 min 41 s from CoreML's cache, inside the first tagged event after a restart."""
+    try:
+        tagger = _get_tagger()
+        if tagger and tagger.plus:
+            import numpy as np
+            t0 = time.monotonic()
+            tagger.plus.tags(np.zeros((tagger.plus.SIZE, tagger.plus.SIZE, 3), np.uint8))
+            log.info("RAM++ warm-up took %.0f s", time.monotonic() - t0)
+    except Exception as e:  # noqa: BLE001 -- the first event will load it or report it
+        log.warning("RAM++ warm-up failed: %r", e)
+
+
 def _get_tagger():
     """The RAM tagger for DIYKEY_RAM_MODEL, loaded once; None when unset or broken."""
     global _tagger, _tagger_warned
@@ -1016,7 +1083,44 @@ def _get_tagger():
         return _tagger or None
 
 
+class _StageTimer:
+    """Milliseconds per named stage of one task; mark(name) closes the stage just finished."""
+
+    def __init__(self):
+        self.start = self.last = time.monotonic()
+        self.stages = {}
+        self.frames = 0
+
+    def mark(self, name):
+        now = time.monotonic()
+        self.stages[name] = self.stages.get(name, 0) + (now - self.last) * 1000
+        self.last = now
+
+    def total_ms(self):
+        return (time.monotonic() - self.start) * 1000
+
+
 def _handle_recognize(console_host, mac_nosep, body):
+    """_recognize, then one "timing" line per event, even if it failed. Live 2026-11-09: events
+    waited up to 842 s in the queue, and that could only be worked out from unrelated log
+    lines. wait = queue, total = the work after it; a stage that did not run is left out."""
+    timer = _StageTimer()
+    try:
+        _recognize(console_host, mac_nosep, body, timer)
+    finally:
+        objects = sorted({str(t).lower() for key in ("roiMeta", "thumbnailMeta")
+                          for t in (e["roi"].get("objectType") or
+                                    (e["roi"].get("attributes") or {}).get("objectType")
+                                    for e in _flatten_meta(body.get(key))) if t})
+        metas = [k for k in ("personMeta", "vehicleMeta", "faceMeta") if body.get(k)]
+        log.info("event %s: timing ms camera=%s ramType=%s objects=%s metas=%s frames=%d "
+                 "wait=%d total=%d %s", body.get("event"), body.get("camera"),
+                 body.get("ramType"), ",".join(objects) or "-", ",".join(metas) or "-",
+                 timer.frames, getattr(_task_ctx, "wait_ms", 0), timer.total_ms(),
+                 " ".join(f"{name}={ms:.0f}" for name, ms in timer.stages.items()))
+
+
+def _recognize(console_host, mac_nosep, body, timer):
     """Fetch the task's clip, tag its key-moment and thumbnail frames, add face/plate parts
     when asked, and POST the result; then, for postVLM, a second POST with the summary.
     Every step is best effort: on a failure that part is left out."""
@@ -1028,12 +1132,14 @@ def _handle_recognize(console_host, mac_nosep, body):
     if body.get("ramType") in ("image", "multipleImages") and STATE_DIR:
         # Retroactive processing (and image RAM): cropped JPEGs by imageId, no clip.
         result = _recognize_images(console_host, mac_nosep, body)
+        timer.mark("tags")
     elif req_url and STATE_DIR:
         t0 = time.monotonic()
         clips_dir = os.path.join(STATE_DIR, "clips")
         url = clip_fetch.mp4_url(console_host, CONSOLE_INTERNAL_API_PORT, req_url)
         clip = clip_fetch.fetch_clip(url, _callback_headers(mac_nosep), (CERT_PATH, KEY_PATH),
                                      clips_dir, event_id)
+        timer.mark("clip")
         if clip and body.get("start") is not None:
             start = int(body["start"])
             ram_moments = set(body.get("keyMoments") or []) | set(body.get("thumbnailMs") or [])
@@ -1044,13 +1150,17 @@ def _handle_recognize(console_host, mac_nosep, body):
                             for entries in (*metas.values(), face_meta) for e in entries}
             # One ffmpeg pass list for both: the meta frames are extra grabs, not key moments.
             frames = clip_fetch.extract_frames(clip, start, sorted(ram_moments | meta_moments))
+            timer.mark("frames")
+            timer.frames = len(frames)
             ram_frames = {ms: p for ms, p in frames.items() if ms in ram_moments}
             log.info("event %s: %d/%d frames (%d for face/lpr)", event_id, len(frames),
                      len(ram_moments | meta_moments), len(meta_moments - ram_moments))
             tagger = _get_tagger()
+            timer.mark("load")
             if tagger and ram_frames:
                 scene = scene_memory.observe(STATE_DIR, tagger, camera_id, event_id, ram_frames,
                                              _event_triggers(body))
+                timer.mark("scene")
                 try:
                     # Only Protect's key moments/thumbnails: a keyMomentsTags row per extra
                     # face/plate grab would be a key moment Protect never asked about.
@@ -1062,14 +1172,33 @@ def _handle_recognize(console_host, mac_nosep, body):
                     log.info("event %s: %s", event_id, result["description"])
                 except Exception as e:  # noqa: BLE001
                     log.warning("RAM tagging failed for event %s: %r", event_id, e)
+                timer.mark("tags")
             if metas:
                 _add_face_lpr(parts, images, metas, frames, meta_start, camera_id, event_id,
                               face_meta=face_meta)
+                timer.mark("face")
         clip_fetch.prune(clips_dir)
     _post_recognize_result(console_host, mac_nosep, body.get("resUrl"), camera_id, event_id,
                            result, parts=parts or None, images=images or None)
+    timer.mark("post")
     if body.get("postVLM") and vlm_describe.enabled():
+        if _truthy(os.environ.get("DIYKEY_VLM_QUEUE", "1")):
+            _submit_task("summary", _run_summary, (console_host, mac_nosep, body, frames, scene),
+                         q=_summary_queue())
+        else:
+            _post_vlm_description(console_host, mac_nosep, body, frames, scene)
+            timer.mark("summary")
+
+
+def _run_summary(console_host, mac_nosep, body, frames, scene):
+    """The summary POST on its own queue, with its own "timing" line."""
+    t0 = time.monotonic()
+    try:
         _post_vlm_description(console_host, mac_nosep, body, frames, scene)
+    finally:
+        log.info("event %s: timing ms summary camera=%s wait=%d total=%d", body.get("event"),
+                 body.get("camera"), getattr(_task_ctx, "wait_ms", 0),
+                 (time.monotonic() - t0) * 1000)
 
 
 # Epoch ms from Sep 2001 up; anything smaller is an offset into the clip. Protect's own ts
@@ -2134,9 +2263,7 @@ def main():
     if missing:
         log.warning("AI Key Advanced alarms (natural-language Alarm Manager rules) won't fire "
                     "reliably -- missing: %s", ", ".join(missing))
-    if clip_embed.enabled():
-        # Load CLIP now: the first query would otherwise wait ~10 s for it.
-        threading.Thread(target=clip_embed.text_embed, args=("warm up",), daemon=True).start()
+    threading.Thread(target=_warm_models, daemon=True, name="diykey-warm").start()
     if os.environ.get("DIYKEY_NL_SEARCH", "1") != "0":
         threading.Thread(target=_nl_search_loop, args=(args.fallback_host_port, device_info),
                          daemon=True).start()

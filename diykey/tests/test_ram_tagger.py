@@ -124,6 +124,16 @@ class RamPlusTest(unittest.TestCase):
                                   {"objectType": "person", "confidence": 90})
         self.assertEqual([t["tag"] for t in res], ["person"])
 
+    def test_special_vehicles_survive_only_on_a_vehicle_crop(self):
+        tags = {"police car": 0.95, "school bus": 1.0, "ambulance": 0.7, "fire truck": 0.7,
+                "oven": 0.9}
+        self.assertEqual(set(ram_tagger.plus_filter(tags, "vehicle")), {"school bus"})
+        self.assertEqual(set(ram_tagger.plus_filter({"ambulance": 0.66, "sedan": 0.8}, "vehicle")),
+                         {"ambulance", "sedan"})
+        self.assertEqual(set(ram_tagger.plus_filter({"tow truck": 0.8}, "vehicle")), {"tow truck"})
+        self.assertEqual(ram_tagger.plus_filter(tags, "person"), {})
+        self.assertEqual(ram_tagger.plus_filter(tags, "animal"), {})
+
 
 class PlusTagger(FakeTagger):
     def __init__(self, plus):

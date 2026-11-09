@@ -82,6 +82,7 @@ restart           touch to restart DIY-Key
 | `DIYKEY_FACE_MIN_PX` | Narrowest face sent to Protect, in frame pixels (default 40, 0 keeps all) |
 | `DIYKEY_REID_MODEL` | OSNet-AIN x1.0 MSMT17 checkpoint: person re-ID vectors and tap-to-find |
 | `DIYKEY_TASK_WORKERS`, `DIYKEY_TASK_QUEUE_MAX`, `DIYKEY_TASK_DROP_AGE_S` | Task pool: workers (default 1), max queued (200; full = drop), max wait before discard (900 s) |
+| `DIYKEY_VLM_QUEUE` | `0` to write automatic summaries on the main task worker. Default on: they have their own queue and worker, so tags aren't held up |
 | `DIYKEY_RAM_TAGS` | Path to Protect's `ram_tags.csv` (query tags; otherwise a built-in list of names checked against it) |
 | `DIYKEY_NL_SEARCH` | `0` to not open the nl-search connection (default on) |
 | `DIYKEY_CLIP_TAG_BLEND` | Weight of the tag text blended into stored embeddings (default 0.1, 0 = off). The same vector feeds search and AI Key Advanced alarm scores: higher = more alarms fire on crops matching their tags, but wrong tags inflate scores too |
