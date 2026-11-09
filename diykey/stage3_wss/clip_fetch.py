@@ -22,6 +22,7 @@ import os
 import re
 import shutil
 import subprocess
+import time
 
 import requests
 from urllib.parse import parse_qsl, urlsplit
@@ -128,13 +129,40 @@ def extract_frames(clip_path, start_ms, moments_ms, ffmpeg="ffmpeg"):
             continue
         if r.returncode == 0 and os.path.exists(jpg):
             frames[int(ts)] = jpg
+        elif _last_frame(clip_path, jpg, ffmpeg):
+            log.info("no frame from %s @%.3fs; used the clip's last frame", clip_path, offset)
+            frames[int(ts)] = jpg
         else:
             log.warning("no frame from %s @%.3fs: %s", clip_path, offset, r.stderr.strip()[:300])
     return frames
 
 
-def prune(clips_dir, keep=KEEP_EVENTS):
-    """Keep the newest `keep` clips (and their frame folders)."""
+def _last_frame(clip_path, jpg, ffmpeg):
+    """The clip's last frame as jpg. Live 2026-11-09 event 438a4d8b: the only key moment was the
+    event's end, 25.295 s into a 25.282 s clip, so the event got no tags and no summary."""
+    try:
+        r = subprocess.run([ffmpeg, "-v", "error", "-y", "-sseof", "-1", "-i", clip_path,
+                            "-update", "1", "-q:v", "3", jpg],
+                           capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError) as e:
+        log.warning("ffmpeg failed for the last frame of %s: %r", clip_path, e)
+        return False
+    return r.returncode == 0 and os.path.exists(jpg)
+
+
+def _min_clip_age_s():
+    """Long enough for a queued summary to still find its frames: the longest a task can wait
+    (DIYKEY_TASK_DROP_AGE_S) plus a margin for the tagging before it was queued."""
+    try:
+        return float(os.environ.get("DIYKEY_TASK_DROP_AGE_S") or 900) + 300
+    except ValueError:
+        return 1200.0
+
+
+def prune(clips_dir, keep=KEEP_EVENTS, min_age_s=None):
+    """Keep the newest `keep` clips (and their frame folders), and any newer than min_age_s."""
+    if min_age_s is None:
+        min_age_s = _min_clip_age_s()
     try:
         clips = sorted((e for e in os.scandir(clips_dir) if e.name.endswith(".mp4")),
                        key=lambda e: e.stat().st_mtime, reverse=True)
@@ -142,6 +170,8 @@ def prune(clips_dir, keep=KEEP_EVENTS):
         return
     for e in clips[keep:]:
         try:
+            if time.time() - e.stat().st_mtime < min_age_s:
+                continue
             os.remove(e.path)
             if os.path.exists(e.path + ".start"):
                 os.remove(e.path + ".start")

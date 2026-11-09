@@ -55,6 +55,10 @@ UMBRELLA = {"person": "person", "vehicle": "vehicle", "animal": "animal"}
 PLUS_PERSON_ONLY = {"man", "woman", "boy", "girl"}
 PLUS_VEHICLE_ONLY = {"sedan", "suv", "truck", "van", "bus", "motorcycle", "bicycle", "pickup truck",
                      "minivan", "taxi", "limo"}
+# Also kept on a vehicle crop though Protect makes no filter label of them. Live 2026-11-09 Driveway
+# clips: only a crop reached the threshold (police car 0.95 against 0.62 on the whole frame, school
+# bus 1.00 against 0.66), and none of 35 ordinary vehicle crops did.
+PLUS_VEHICLE_KINDS = {"police car", "ambulance", "fire truck", "school bus", "tow truck"}
 # Used when DIYKEY_RAM_TAGS is unset: the RAM++ tags Protect's convertRamTagsToLabels turns into a
 # Find Anything filter (gender, clothing type, accessory, vehicle type), all enabled rows of
 # ram_tags.csv on 7.3.70 (587258_convertRamTagsToLabels.js, 594367_*.js).
@@ -170,7 +174,12 @@ def plus_filter(plus_tags, object_type):
     """RAM++ tags that fit a crop of this Protect object type (see PLUS_PERSON_ONLY). On a
     person/vehicle/animal crop only label-producing tags survive: live 2026-11-07 doorbell person
     crop got oven/food/baker/tray, which would pollute Find Anything."""
-    out = {t: v for t, v in plus_tags.items() if label_tag(t)} if object_type else dict(plus_tags)
+    kinds = PLUS_VEHICLE_KINDS if object_type == "vehicle" else ()
+    out = {t: v for t, v in plus_tags.items() if label_tag(t) or t in kinds} \
+        if object_type else dict(plus_tags)
+    special = sorted((t for t in out if t in kinds), key=out.get)
+    for t in special[:-1]:  # one vehicle, one kind: the 12:56 police car also scored ambulance 0.66
+        del out[t]
     if object_type and object_type != "person":
         for t in PLUS_PERSON_ONLY:
             out.pop(t, None)

@@ -7,6 +7,7 @@ import shutil
 import struct
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from unittest import mock
@@ -701,6 +702,9 @@ class _RecognizeTest(_StateDirTest):
             p = mock.patch.object(target, attr, value)
             p.start()
             self.addCleanup(p.stop)
+        p = mock.patch.dict(os.environ, {"DIYKEY_VLM_QUEUE": "0"})
+        p.start()
+        self.addCleanup(p.stop)
 
     def _body(self, **kw):
         s = self.START
@@ -722,8 +726,147 @@ class _RecognizeTest(_StateDirTest):
         return self.post.call_args_list[n].kwargs["files"]
 
 
+class TestRecognizeTiming(_RecognizeTest):
+    """One greppable "timing" line per event: long-running events can be found from the log."""
+
+    def _timing(self, cm):
+        lines = [r.getMessage() for r in cm.records if "timing ms" in r.getMessage()]
+        self.assertEqual(len(lines), 1)
+        return lines[0]
+
+    def test_stages_that_ran_are_logged_with_the_queue_wait(self):
+        ucp4_client._task_ctx.wait_ms = 1234
+        self.addCleanup(delattr, ucp4_client._task_ctx, "wait_ms")
+        with self.assertLogs(ucp4_client.log, "INFO") as cm:
+            self._run(self._body())
+        line = self._timing(cm)
+        self.assertIn("event ev1: timing ms camera=cam1 ramType=None objects=- metas=- frames=3 "
+                      "wait=1234 total=", line)
+        for stage in ("clip=", "frames=", "load=", "post="):
+            self.assertIn(stage, line)
+        for stage in ("tags=", "face=", "summary="):  # no tagger, no metas, no postVLM here
+            self.assertNotIn(stage, line)
+
+    def test_says_what_kind_of_event_it_was(self):
+        roi = {"coord": [1, 2, 3, 4], "objectType": "person", "trackerID": 1}
+        face = {"coord": [1, 2, 3, 4], "objectType": "face", "trackerID": 2}
+        body = self._body(ramType="video", roiMeta=[{"ts": self.START, "roi": [roi]}],
+                          thumbnailMeta=[{"ts": self.START, "roi": [face]}],
+                          personMeta=[{"ts": self.START, "roi": roi}])
+        with self.assertLogs(ucp4_client.log, "INFO") as cm:
+            self._run(body)
+        self.assertIn("ramType=video objects=face,person metas=personMeta frames=", self._timing(cm))
+
+    def test_logged_when_the_task_fails(self):
+        ucp4_client.clip_fetch.fetch_clip.side_effect = RuntimeError("boom")
+        with self.assertLogs(ucp4_client.log, "INFO") as cm, self.assertRaises(RuntimeError):
+            self._run(self._body())
+        self.assertNotIn("clip=", self._timing(cm))
+
+    def test_worker_records_the_wait_before_running_the_task(self):
+        seen, done = [], threading.Event()
+
+        def task():
+            seen.append(ucp4_client._task_ctx.wait_ms)
+            done.set()
+
+        self.assertTrue(ucp4_client._submit_task("timing-test", task, ()))
+        self.assertTrue(done.wait(5))
+        self.assertGreaterEqual(seen[0], 0)
+
+
+class TestSummaryQueue(_RecognizeTest):
+    """Live 2026-11-09: a summary was half of each event on the only task worker."""
+
+    def test_queued_after_the_tags_are_posted(self):
+        with mock.patch.object(ucp4_client, "_submit_task", return_value=True) as submit, \
+                mock.patch.object(ucp4_client, "_summary_queue", return_value="Q"), \
+                mock.patch.object(ucp4_client, "_post_vlm_description") as post_vlm, \
+                mock.patch.object(ucp4_client, "_post_recognize_result") as post_tags:
+            self._run(self._body(postVLM=True), {"DIYKEY_VLM": "mlx", "DIYKEY_VLM_QUEUE": "1"})
+        post_tags.assert_called_once()
+        post_vlm.assert_not_called()
+        self.assertEqual(submit.call_args.args[:2], ("summary", ucp4_client._run_summary))
+        self.assertEqual(submit.call_args.kwargs["q"], "Q")
+
+    def test_off_writes_it_on_the_main_worker(self):
+        with mock.patch.object(ucp4_client, "_submit_task") as submit, \
+                mock.patch.object(ucp4_client, "_post_vlm_description") as post_vlm:
+            self._run(self._body(postVLM=True), {"DIYKEY_VLM": "mlx"})
+        post_vlm.assert_called_once()
+        submit.assert_not_called()
+
+    def test_separate_from_the_main_queue(self):
+        self.assertIsNot(ucp4_client._summary_queue(), ucp4_client._task_queue())
+
+    def test_summary_has_its_own_timing_line_even_if_it_fails(self):
+        with mock.patch.object(ucp4_client, "_post_vlm_description", side_effect=RuntimeError), \
+                self.assertLogs(ucp4_client.log, "INFO") as cm, self.assertRaises(RuntimeError):
+            ucp4_client._run_summary("h", "m", {"event": "e", "camera": "c"}, {}, None)
+        self.assertIn("event e: timing ms summary camera=c wait=", cm.output[-1])
+
+
+class TestWarmModels(unittest.TestCase):
+    ALL = {"DIYKEY_FACE": "1", "DIYKEY_FACE_ENHANCE": "1", "DIYKEY_LPR": "1"}
+
+    def _run(self, env, on=True, describe=None):
+        order = []
+        step = lambda name: mock.Mock(side_effect=lambda *a: order.append(name))
+        c = ucp4_client
+        infer = step("face")
+        with mock.patch.dict(os.environ, env), \
+                mock.patch.object(c.clip_embed, "enabled", return_value=on), \
+                mock.patch.object(c.clip_embed, "text_embed", step("clip")), \
+                mock.patch.object(c.vlm_describe, "enabled", return_value=on), \
+                mock.patch.object(c.vlm_describe, "describe", describe or step("vlm")), \
+                mock.patch.object(c.reid_model, "enabled", return_value=on), \
+                mock.patch.object(c.reid_model, "embed", step("reid")), \
+                mock.patch.object(c.face_recog._models, "infer_fn", return_value=infer), \
+                mock.patch.object(c.face_enhance, "enhance", step("enhance")), \
+                mock.patch.object(c.lpr, "lpr_available", return_value=True), \
+                mock.patch.object(c.lpr, "_alpr_reader", step("lpr")), \
+                mock.patch.object(c, "_warm_ram_plus", step("ram")):
+            c._warm_models()
+        return order
+
+    def test_every_enabled_model_with_ram_plus_last(self):
+        self.assertEqual(self._run(self.ALL),
+                         ["clip", "vlm", "reid", "face", "enhance", "lpr", "ram"])
+
+    def test_disabled_models_are_skipped(self):
+        env = {k: "0" for k in self.ALL}
+        self.assertEqual(self._run(env, on=False), ["ram"])
+
+    def test_one_failure_does_not_stop_the_rest(self):
+        with self.assertLogs(ucp4_client.log, "WARNING") as cm:
+            order = self._run(self.ALL, describe=mock.Mock(side_effect=RuntimeError("x")))
+        self.assertIn("VLM warm-up failed", cm.output[0])
+        self.assertEqual(order[-1], "ram")
+        self.assertIn("reid", order)
+
+
+class TestWarmRamPlus(unittest.TestCase):
+    def test_runs_one_blank_frame_through_ram_plus(self):
+        tagger = mock.Mock()
+        tagger.plus.SIZE = 384
+        with mock.patch.object(ucp4_client, "_get_tagger", return_value=tagger):
+            ucp4_client._warm_ram_plus()
+        tagger.plus.tags.assert_called_once()
+        self.assertEqual(tagger.plus.tags.call_args.args[0].shape, (384, 384, 3))
+
+    def test_nothing_without_ram_plus(self):
+        for tagger in (None, mock.Mock(plus=None)):
+            with mock.patch.object(ucp4_client, "_get_tagger", return_value=tagger):
+                ucp4_client._warm_ram_plus()
+
+    def test_failure_is_only_a_warning(self):
+        with mock.patch.object(ucp4_client, "_get_tagger", side_effect=RuntimeError("x")), \
+                self.assertLogs(ucp4_client.log, "WARNING"):
+            ucp4_client._warm_ram_plus()
+
+
 class TestRecognizeFaceLpr(_RecognizeTest):
-    ON = {"DIYKEY_FACE": "1", "DIYKEY_LPR": "1"}
+    ON ={"DIYKEY_FACE": "1", "DIYKEY_LPR": "1"}
     BOTH = {"enableFaceRecognize": True, "enableLprRecognize": True}
 
     def _metas(self, offset=0):
