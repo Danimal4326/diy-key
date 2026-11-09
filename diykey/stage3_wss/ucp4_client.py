@@ -54,6 +54,7 @@ import face_recog  # noqa: E402
 import lpr  # noqa: E402
 import face_enhance  # noqa: E402
 import vlm_describe  # noqa: E402
+import scene_memory  # noqa: E402
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -1022,6 +1023,7 @@ def _handle_recognize(console_host, mac_nosep, body):
     camera_id, event_id = body.get("camera"), body.get("event")
     result = None
     parts, images, frames = {}, {}, {}
+    scene = None
     req_url = body.get("reqUrl")
     if body.get("ramType") in ("image", "multipleImages") and STATE_DIR:
         # Retroactive processing (and image RAM): cropped JPEGs by imageId, no clip.
@@ -1047,6 +1049,8 @@ def _handle_recognize(console_host, mac_nosep, body):
                      len(ram_moments | meta_moments), len(meta_moments - ram_moments))
             tagger = _get_tagger()
             if tagger and ram_frames:
+                scene = scene_memory.observe(STATE_DIR, tagger, camera_id, event_id, ram_frames,
+                                             _event_triggers(body))
                 try:
                     # Only Protect's key moments/thumbnails: a keyMomentsTags row per extra
                     # face/plate grab would be a key moment Protect never asked about.
@@ -1054,6 +1058,7 @@ def _handle_recognize(console_host, mac_nosep, body):
                         tagger, camera_id, event_id, ram_frames,
                         pre_ms=(time.monotonic() - t0) * 1000,
                         objects=_video_objects(body, frames), roi_meta=body.get("roiMeta"))
+                    result = scene_memory.filter_result(result, scene)
                     log.info("event %s: %s", event_id, result["description"])
                 except Exception as e:  # noqa: BLE001
                     log.warning("RAM tagging failed for event %s: %r", event_id, e)
@@ -1064,7 +1069,7 @@ def _handle_recognize(console_host, mac_nosep, body):
     _post_recognize_result(console_host, mac_nosep, body.get("resUrl"), camera_id, event_id,
                            result, parts=parts or None, images=images or None)
     if body.get("postVLM") and vlm_describe.enabled():
-        _post_vlm_description(console_host, mac_nosep, body, frames)
+        _post_vlm_description(console_host, mac_nosep, body, frames, scene)
 
 
 # Epoch ms from Sep 2001 up; anything smaller is an offset into the clip. Protect's own ts
@@ -1236,24 +1241,141 @@ def _vlm_frame(body, frames):
     return frames[moments[len(moments) // 2]] if moments else None
 
 
-def _post_vlm_description(console_host, mac_nosep, body, frames):
+# What triggered the event, for the auto summary. The firmware's auto summary gets no object
+# type, box or history (fw 2.2.8 ui-vlm-agent app.py: one fixed prompt, one frame); Protect's Deep
+# Understanding is the precedent for describing a crop of one object. Live 2026-11-08 Driveway:
+# passing cars were summarised as "Red car parked in driveway" from the whole frame.
+VLM_CROP_SCALE = 3.0  # Driveway's boxes land about 1 s off fast cars, so a tight crop misses them
+VLM_EDGE_MARGIN = 20      # on 0..1000: a box this close to the frame edge is cut off or too near
+VLM_MAX_BOX_AREA = 0.4    # fraction of the frame: a box bigger than this is right at the lens
+VLM_EDGE_VEHICLE_SCALE = 1.5  # see _vlm_event_crop
+_VLM_KIND = {"person": "person", "vehicle": "vehicle", "car": "vehicle", "truck": "vehicle",
+             "bus": "vehicle", "motorcycle": "vehicle", "bicycle": "vehicle", "animal": "animal",
+             "dog": "animal", "cat": "animal", "bird": "animal"}
+_VLM_SUBJECT = {"person": ("person", "the person"), "vehicle": ("vehicle", "it"),
+                "animal": ("animal", "it")}
+
+
+def _valid_coord(coord):
+    """[x, y, w, h] floats (0..1000) with a real area, or None."""
+    try:
+        x, y, w, h = (float(v) for v in coord[:4])
+    except (TypeError, ValueError):
+        return None
+    return [x, y, w, h] if w > 0 and h > 0 else None
+
+
+def _event_triggers(body):
+    """[{ts, coord, objectType, trackerID}]: the objects that triggered this event, from
+    thumbnailMeta, else roiMeta (roi a dict or a list; coord [x, y, w, h] on 0..1000)."""
+    for key in ("thumbnailMeta", "roiMeta"):
+        found = []
+        for entry in _flatten_meta(body.get(key)):
+            roi = entry["roi"]
+            coord = _valid_coord(roi.get("coord"))
+            try:
+                ts = int(float(entry["ts"]))
+            except (TypeError, ValueError):
+                continue
+            if coord:
+                otype = roi.get("objectType") or (roi.get("attributes") or {}).get("objectType")
+                found.append({"ts": ts, "coord": coord,
+                              "objectType": str(otype).lower() if otype else None,
+                              "trackerID": roi.get("trackerID", roi.get("trackerId"))})
+        if found:
+            return found
+    return []
+
+
+def _vlm_box_is_clear(coord):
+    """False for a box touching the frame edge or filling most of it. Live 2026-11-08 19:36
+    Doorbell: the largest box [41, 111, 544, 880] was the walker right beside the camera, blown
+    out by the IR light with the head blurred, and the summary said "walking into a dark room";
+    the standing frame a second earlier had a clear box."""
+    return not _vlm_box_at_edge(coord) and coord[2] * coord[3] <= VLM_MAX_BOX_AREA * 1000 * 1000
+
+
+def _vlm_box_at_edge(coord):
+    x, y, w, h = coord
+    return (x < VLM_EDGE_MARGIN or y < VLM_EDGE_MARGIN or x + w > 1000 - VLM_EDGE_MARGIN
+            or y + h > 1000 - VLM_EDGE_MARGIN)
+
+
+def _vlm_trigger(triggers, frames):
+    """The trigger box to describe, from those we have a frame for: a person if there is one,
+    then the largest clear box, or the largest of any if none is clear. None without a frame."""
+    usable = [t for t in triggers if t["ts"] in frames]
+    group = [t for t in usable if t["objectType"] == "person"] or usable
+    clear = [t for t in group if _vlm_box_is_clear(t["coord"])]
+    return max(clear or group, key=lambda t: t["coord"][2] * t["coord"][3], default=None)
+
+
+def _vlm_event_crop(img, coord, object_type=None):
+    """The box expanded to VLM_CROP_SCALE times its size about its centre, clamped to the frame
+    and below the timestamp band the whole-frame path crops off; None if nothing is left.
+
+    A vehicle box at the frame edge gets VLM_EDGE_VEHICLE_SCALE and keeps the band. Live
+    2026-11-09 07:49 Driveway: a garbage truck at the top left, box [0, 8, 212, 201]; the 3x crop
+    took in the parked red car and the band cut the truck in half, and the summary said "A red
+    car driving down the road"."""
+    h, w = img.shape[:2]
+    edge_vehicle = _VLM_KIND.get(object_type) == "vehicle" and _vlm_box_at_edge(coord)
+    scale = VLM_EDGE_VEHICLE_SCALE if edge_vehicle else VLM_CROP_SCALE
+    top = 0 if edge_vehicle else int(h * vlm_describe.CROP_TOP_FRAC)
+    x, y, bw, bh = coord[0] * w / 1000, coord[1] * h / 1000, coord[2] * w / 1000, coord[3] * h / 1000
+    cx, cy, half_w, half_h = x + bw / 2, y + bh / 2, bw * scale / 2, bh * scale / 2
+    x0, x1 = max(0, int(cx - half_w)), min(w, int(cx + half_w))
+    y0, y1 = max(top, int(cy - half_h)), min(h, int(cy + half_h))
+    return img[y0:y1, x0:x1] if x1 - x0 >= 8 and y1 - y0 >= 8 else None
+
+
+def _vlm_context(trigger):
+    noun, pronoun = _VLM_SUBJECT.get(_VLM_KIND.get(trigger["objectType"]), ("object", "it"))
+    return (f"This event was triggered by a moving {noun}. Describe {pronoun} and what "
+            f"{'they are' if noun == 'person' else 'it is'} doing. "
+            "Ignore parked or stationary objects.")
+
+
+def _vlm_event_subject(body, frames):
+    """(crop, context) for the object that triggered the event, or (None, None) to keep the
+    firmware's whole-frame summary (setting off, no usable box, or no frame for it)."""
+    import cv2
+    if not _truthy(os.environ.get("DIYKEY_VLM_EVENT_CONTEXT", "1")):
+        return None, None
+    trigger = _vlm_trigger(_event_triggers(body), frames)
+    img = cv2.imread(frames[trigger["ts"]]) if trigger else None
+    crop = _vlm_event_crop(img, trigger["coord"], trigger["objectType"]) if img is not None else None
+    return (crop, _vlm_context(trigger)) if crop is not None else (None, None)
+
+
+def _post_vlm_description(console_host, mac_nosep, body, frames, scene=None):
     """postVLM: the AI Key's VLM agent posts a second multipart after the RAM result, with
     only ram={eventId, status, description} (ui-vlm-agent app.py:376-405). Protect reads a
     ram without keyMomentsTags as a description update to the event (M/315148:99-105,
     M/618986:72-74 -> saveRamDescriptionEnhancement M/543268:18-29). cameraId is added: the
-    firmware omits it, but Protect's description schema requires it (M/315148:99-104)."""
+    firmware omits it, but Protect's description schema requires it (M/315148:99-104).
+
+    Summarises the triggering object when the task names one (see _vlm_event_subject), and
+    `scene` (scene_memory) adds what changed and what to leave out. Only the description
+    string differs: no fields are added."""
     import cv2
     camera_id, event_id = body.get("camera"), body.get("event")
-    path = _vlm_frame(body, frames)
-    img = cv2.imread(path) if path else None
-    if img is None:
-        log.info("event %s: postVLM but no frame to describe", event_id)
-        return
-    text = vlm_describe.describe(img)
+    img, context = _vlm_event_subject(body, frames)
+    if img is not None:
+        text = vlm_describe.describe(img, context=context, crop_top=False)
+    else:
+        path = _vlm_frame(body, frames)
+        img = cv2.imread(path) if path else None
+        if img is None:
+            log.info("event %s: postVLM but no frame to describe", event_id)
+            return
+        context = scene_memory.ignore_context(scene)
+        text = vlm_describe.describe(img, context=context) if context else vlm_describe.describe(img)
     if not text:
         log.info("event %s: postVLM but no description", event_id)
         return
-    log.info("event %s: summary %r", event_id, text)
+    text = scene_memory.summary_text(text, scene)
+    log.info("event %s: summary %r (context %r)", event_id, text, context)
     _post_recognize_result(console_host, mac_nosep, body.get("resUrl"), camera_id, event_id,
                            {"cameraId": camera_id, "eventId": event_id, "status": "success",
                             "description": text})

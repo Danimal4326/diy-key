@@ -112,5 +112,27 @@ class DescribeTest(unittest.TestCase):
         self.assertEqual(results, ["A cat."] * 4)
 
 
+class ContextTest(unittest.TestCase):
+    def test_context_is_appended_for_that_call_only(self):
+        prompts = []
+
+        def backend(rgb, prompt):
+            prompts.append(prompt)
+            return "A car."
+        f = _frame(64, 64)
+        vd.describe(f, backend=backend, context="This event was triggered by a moving vehicle.")
+        vd.describe(f, backend=backend)
+        self.assertEqual(prompts[0], vd.PROMPT + "\nThis event was triggered by a moving vehicle.")
+        self.assertEqual(prompts[1], vd.PROMPT)
+
+    def test_a_crop_keeps_its_top(self):
+        shapes = []
+        f = _frame(64, 100)
+        vd.describe(f, backend=lambda rgb, p: shapes.append(rgb.shape) or "A car.", crop_top=False)
+        self.assertEqual(shapes[0][:2], (100, 64))
+        vd.describe(f, backend=lambda rgb, p: shapes.append(rgb.shape) or "A car.")
+        self.assertEqual(shapes[1][:2], (90, 64))
+
+
 if __name__ == "__main__":
     unittest.main()

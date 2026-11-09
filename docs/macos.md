@@ -85,6 +85,10 @@ restart           touch to restart DIY-Key
 | `DIYKEY_RAM_TAGS` | Path to Protect's `ram_tags.csv` (query tags; otherwise a built-in list of names checked against it) |
 | `DIYKEY_NL_SEARCH` | `0` to not open the nl-search connection (default on) |
 | `DIYKEY_CLIP_TAG_BLEND` | Weight of the tag text blended into stored embeddings (default 0.1, 0 = off). The same vector feeds search and AI Key Advanced alarm scores: higher = more alarms fire on crops matching their tags, but wrong tags inflate scores too |
+| `DIYKEY_VLM_EVENT_CONTEXT` | `0` to summarise the whole frame as the firmware does. Default on: automatic summaries describe a crop 3x the triggering object's box (1.5x for a vehicle at the frame edge) and say what triggered the event |
+| `DIYKEY_SCENE_MEMORY` | `1` to learn per camera what is always in the picture, so a parked car stops appearing in tags and summaries and changes get reported (default off; see below) |
+| `DIYKEY_SCENE_VEHICLE_*`, `DIYKEY_SCENE_ANIMAL_*`, `DIYKEY_SCENE_PERSON_*` | Scene-memory thresholds, starting guesses: `_EVENTS` (3), `_MINUTES` (vehicle 30, others 10), `_IOU` (0.6, 0.2), `_SIM` (0.85, animal 0.75, person 0.7); animal and person also `_SCORE` (0.7, 0.6) and `_EXPIRE_MINUTES` (60, 15) |
+| `DIYKEY_SCENE_FIXTURE_DAYS`, `_FIXTURE_EVENTS`, `_FIXTURE_IOU`, `_MISSING_EVENTS`, `_TRIGGER_OVERLAP`, `_APPEARANCE_WEIGHT`, `_KEEP_DAYS` | Same-look-and-spot age for a fixture (7 days, at least 7 events, IoU 0.6); events missing before a move is reported (2); overlap with the trigger box that isn't evidence (0.3); appearance weight for animals and people (0.75); how long unconfirmed objects are kept (3 days) |
 | `DIYKEY_FW_VERSION`, `DIYKEY_DISCOVERY_FW_VERSION` | Factory firmware; a simulated update pins newer in `state/fw_version.json` |
 | `DIYKEY_FW_DIR`, `DIYKEY_FW_DOWNLOAD`, `DIYKEY_FAKE_UPDATE_S` | Where offered firmware is kept (default `~/.diy-key/firmware`), whether, and how long the fake install takes |
 | `DIYKEY_PG`, `DIYKEY_PG_BIN` | `0` to run without the instance's PostgreSQL; Homebrew `postgresql@17` bin dir |
@@ -95,6 +99,13 @@ AI Key Advanced alarms (Alarm Manager rules with a natural-language sentence and
 one warning naming whatever is missing. Protect parses a rule's sentence once (at first use) and
 caches the result (tags and text embedding) on the rule; a rule saved while these were missing may
 keep an empty tag list and never fire, so recreate it after fixing them.
+
+Scene memory (`DIYKEY_SCENE_MEMORY=1`) keeps `state/scene_memory/<camera>.json`. It needs
+`DIYKEY_CLIP=1` for vehicles and animals and `DIYKEY_REID_MODEL` for people. It learns only from
+frames at events, so a change is noticed at the next event, and a moved camera resets what it has
+learned, reporting the old objects as gone once. People are never removed from tags, however long
+they stay. A fixture (7 days unchanged) is ignored and dropped silently, so a car parked that long
+no longer gets a "has moved" sentence. Delete a camera's file to start it over.
 
 ## Run
 
