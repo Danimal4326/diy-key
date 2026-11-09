@@ -938,6 +938,188 @@ class TestRecognizePostVlm(_RecognizeTest):
         self.assertIsNone(ucp4_client._vlm_frame({"keyMoments": [7]}, frames))
 
 
+class TestVlmEventContext(_RecognizeTest):
+    """Live 2026-11-08 Driveway: passing cars summarised as "Red car parked in driveway"."""
+    MS = 1_790_000_000_000
+
+    def _frames(self, w=1000, h=1000):
+        path = os.path.join(self.d, "still.png")
+        img = self.np.full((h, w, 3), 50, self.np.uint8)
+        self.cv2.imwrite(path, img)
+        return {self.MS: path}
+
+    def _meta(self, coord=(400, 400, 100, 100), otype="vehicle", key="thumbnailMeta", as_list=True):
+        roi = {"coord": list(coord), "objectType": otype, "trackerID": 3}
+        return {"camera": "c", "event": "e", "resUrl": "/r", "keyMoments": [self.MS],
+                key: [{"ts": self.MS, "roi": [roi] if as_list else roi}]}
+
+    def _summarise(self, body, frames=None, scene=None, env=None):
+        with mock.patch.dict(os.environ, env or {}), \
+                mock.patch.object(ucp4_client.vlm_describe, "describe",
+                                  return_value="A car drives past.") as describe:
+            ucp4_client._post_vlm_description("h", "m", body, frames or self._frames(), scene)
+        return describe
+
+    def test_describes_a_crop_three_times_the_box(self):
+        describe = self._summarise(self._meta())
+        img = describe.call_args.args[0]
+        self.assertEqual(img.shape[:2], (300, 300))
+        self.assertIn("moving vehicle", describe.call_args.kwargs["context"])
+        self.assertIn("Ignore parked or stationary objects", describe.call_args.kwargs["context"])
+        self.assertFalse(describe.call_args.kwargs["crop_top"])
+
+    def test_crop_clamped_to_the_frame_and_below_the_timestamp(self):
+        img = self.np.zeros((1000, 1000, 3), self.np.uint8)
+        crop = ucp4_client._vlm_event_crop(img, [0, 20, 100, 100])
+        self.assertEqual(crop.shape[:2], (120, 200))  # y: 100 (the band) to 220; x: 0 to 200
+
+    def test_vehicle_at_the_edge_gets_a_tight_crop_and_keeps_the_band(self):
+        img = self.np.zeros((1000, 1000, 3), self.np.uint8)
+        crop = ucp4_client._vlm_event_crop(img, [0, 8, 212, 201], "truck")
+        self.assertEqual(crop.shape[:2], (259, 265))  # 1.5x, y from 0, not from the band
+
+    def test_person_at_the_edge_keeps_the_wide_crop(self):
+        img = self.np.zeros((1000, 1000, 3), self.np.uint8)
+        crop = ucp4_client._vlm_event_crop(img, [0, 8, 212, 201], "person")
+        self.assertEqual(crop.shape[:2], (310, 424))  # 3x, y from the band at 100
+
+    def test_vehicle_away_from_the_edge_keeps_the_wide_crop(self):
+        img = self.np.zeros((1000, 1000, 3), self.np.uint8)
+        crop = ucp4_client._vlm_event_crop(img, [400, 400, 100, 100], "vehicle")
+        self.assertEqual(crop.shape[:2], (300, 300))
+
+    def test_summary_of_an_edge_vehicle_uses_the_tight_crop(self):
+        describe = self._summarise(self._meta(coord=(0, 8, 212, 201)))
+        self.assertEqual(describe.call_args.args[0].shape[:2], (259, 265))
+
+    def test_roi_meta_when_there_is_no_thumbnail_meta(self):
+        describe = self._summarise(self._meta(key="roiMeta", as_list=False))
+        self.assertEqual(describe.call_args.args[0].shape[:2], (300, 300))
+
+    def test_prefers_a_person_then_the_largest(self):
+        frames = {self.MS: "x"}
+        big = {"ts": self.MS, "coord": [0, 0, 500, 500], "objectType": "vehicle"}
+        person = {"ts": self.MS, "coord": [0, 0, 10, 10], "objectType": "person"}
+        small = {"ts": self.MS, "coord": [0, 0, 5, 5], "objectType": "person"}
+        self.assertIs(ucp4_client._vlm_trigger([big, small, person], frames), person)
+        self.assertIs(ucp4_client._vlm_trigger([big], frames), big)
+
+    def _boxes(self, *coords, otype="person"):
+        return [{"ts": self.MS + i, "coord": list(c), "objectType": otype}
+                for i, c in enumerate(coords)]
+
+    def test_live_doorbell_walk_by_skips_the_blown_out_close_up(self):
+        # 2026-11-08 19:36 Doorbell thumbnailMeta, in Protect's order.
+        boxes = self._boxes((348, 334, 326, 589), (41, 111, 544, 880), (255, 305, 462, 681))
+        frames = {t["ts"]: "x" for t in boxes}
+        self.assertIs(ucp4_client._vlm_trigger(boxes, frames), boxes[0])
+
+    def test_largest_of_the_clear_boxes(self):
+        boxes = self._boxes((100, 100, 100, 100), (300, 300, 300, 300))
+        self.assertIs(ucp4_client._vlm_trigger(boxes, {t["ts"]: "x" for t in boxes}), boxes[1])
+
+    def test_a_box_at_any_edge_or_too_big_is_not_clear(self):
+        for coord in ((0, 300, 100, 100), (300, 5, 100, 100), (900, 300, 95, 100),
+                      (300, 900, 100, 95), (100, 100, 700, 700)):
+            self.assertFalse(ucp4_client._vlm_box_is_clear(list(coord)), coord)
+        self.assertTrue(ucp4_client._vlm_box_is_clear([100, 100, 500, 500]))
+
+    def test_falls_back_to_the_largest_when_none_is_clear(self):
+        boxes = self._boxes((0, 0, 100, 100), (0, 0, 300, 300))
+        self.assertIs(ucp4_client._vlm_trigger(boxes, {t["ts"]: "x" for t in boxes}), boxes[1])
+
+    def test_a_person_at_the_edge_still_beats_a_clear_vehicle(self):
+        person = self._boxes((0, 0, 100, 100))
+        vehicle = self._boxes((300, 300, 200, 200), otype="vehicle")
+        vehicle[0]["ts"] = self.MS + 9
+        frames = {self.MS: "x", self.MS + 9: "x"}
+        self.assertIs(ucp4_client._vlm_trigger(vehicle + person, frames), person[0])
+
+    def test_person_context(self):
+        describe = self._summarise(self._meta(otype="person"))
+        self.assertIn("moving person", describe.call_args.kwargs["context"])
+        self.assertIn("what they are doing", describe.call_args.kwargs["context"])
+
+    def test_no_usable_box_keeps_the_whole_frame(self):
+        body = self._meta()
+        body["thumbnailMeta"][0]["roi"][0]["coord"] = [1, 2, 0, 0]
+        describe = self._summarise(body)
+        self.assertEqual(describe.call_args.args[0].shape[:2], (1000, 1000))
+        self.assertEqual(describe.call_args.kwargs, {})
+
+    def test_box_without_a_frame_keeps_the_whole_frame(self):
+        body = self._meta()
+        body["thumbnailMeta"][0]["ts"] = self.MS + 5
+        describe = self._summarise(body)
+        self.assertEqual(describe.call_args.kwargs, {})
+
+    def test_setting_off_keeps_the_whole_frame(self):
+        describe = self._summarise(self._meta(), env={"DIYKEY_VLM_EVENT_CONTEXT": "0"})
+        self.assertEqual(describe.call_args.args[0].shape[:2], (1000, 1000))
+        self.assertEqual(describe.call_args.kwargs, {})
+
+    def test_whole_frame_fallback_names_what_to_ignore(self):
+        scene = ucp4_client.scene_memory.EventScene()
+        scene.ignore = ["the parked red car"]
+        body = self._meta()
+        del body["thumbnailMeta"]
+        describe = self._summarise(body, scene=scene)
+        self.assertIn("Ignore the parked red car", describe.call_args.kwargs["context"])
+
+    def test_changes_go_in_the_description_only(self):
+        scene = ucp4_client.scene_memory.EventScene()
+        scene.changes = ["The parked car has moved."]
+        scene.still = ["The person is still there."]
+        self._summarise(self._meta(), scene=scene)
+        body = json.loads(self.post.call_args.kwargs["files"]["ram"][1])
+        self.assertEqual(body, {"cameraId": "c", "eventId": "e", "status": "success",
+                                "description": "The parked car has moved. A car drives past. "
+                                               "The person is still there."})
+
+
+class TestSceneMemoryWiring(_RecognizeTest):
+    def _tagged(self, env, **observe):
+        tagger = mock.Mock()
+        ram = {"cameraId": "cam1", "eventId": "ev1", "description": "Car detected.",
+               "keyMomentsTags": [{"keyMomentMs": 1, "tags": [{"tag": "car", "confScore": 0.9}]}]}
+        with mock.patch.object(ucp4_client, "_get_tagger", return_value=tagger), \
+                mock.patch.object(ucp4_client.ram_tagger, "build_result", return_value=ram), \
+                mock.patch.object(ucp4_client.scene_memory, "observe", **observe) as obs:
+            self._run(self._body(), env)
+        return obs
+
+    def test_a_learned_scene_filters_the_upload(self):
+        scene = ucp4_client.scene_memory.EventScene()
+        scene.hide = {"vehicle"}
+        self._tagged({}, return_value=scene)
+        sent = json.loads(self._files(0)["ram"][1])
+        self.assertEqual(sent["keyMomentsTags"][0]["tags"], [])
+        self.assertEqual(sent["description"], "Motion detected.")
+
+    def test_a_crash_in_scene_memory_still_uploads(self):
+        with mock.patch.object(ucp4_client.scene_memory, "_observe",
+                               side_effect=RuntimeError("boom")), \
+                mock.patch.dict(os.environ, {"DIYKEY_SCENE_MEMORY": "1"}):
+            tagger = mock.Mock()
+            ram = {"cameraId": "cam1", "eventId": "ev1", "description": "Car detected.",
+                   "keyMomentsTags": []}
+            with mock.patch.object(ucp4_client, "_get_tagger", return_value=tagger), \
+                    mock.patch.object(ucp4_client.ram_tagger, "build_result", return_value=ram), \
+                    self.assertLogs("diykey.scene", "WARNING"):
+                self._run(self._body(), {"DIYKEY_SCENE_MEMORY": "1"})
+        self.assertEqual(json.loads(self._files(0)["ram"][1])["description"], "Car detected.")
+
+    def test_off_by_default_the_upload_is_unchanged(self):
+        tagger = mock.Mock()
+        ram = {"cameraId": "cam1", "eventId": "ev1", "description": "Car detected.",
+               "keyMomentsTags": []}
+        with mock.patch.object(ucp4_client, "_get_tagger", return_value=tagger), \
+                mock.patch.object(ucp4_client.ram_tagger, "build_result", return_value=ram):
+            self._run(self._body(), {})
+        tagger.detect.assert_not_called()
+        self.assertEqual(json.loads(self._files(0)["ram"][1])["description"], "Car detected.")
+
+
 class TestEnhanceImage(_StateDirTest):
     BODY = {"reqUrl": "/internal/aiprocessors/image/img1?type=face&camera=cam1"
                       "&smartDetectObject=obj1",

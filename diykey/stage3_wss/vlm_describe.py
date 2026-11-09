@@ -74,10 +74,11 @@ _loaded = {}                    # (backend, model) -> callable(rgb, prompt) -> s
 _failed = set()                 # (backend, model) that failed to load: logged once
 
 
-def preprocess(bgr):
-    """BGR frame -> RGB uint8 array, top 10% cropped, long side <= 1280."""
+def preprocess(bgr, crop_top=True):
+    """BGR frame -> RGB uint8 array, top 10% cropped, long side <= 1280. crop_top=False is for
+    a crop that already left the frame's timestamp band out: it would lose its own top."""
     h = bgr.shape[0]
-    img = bgr[int(h * CROP_TOP_FRAC):]
+    img = bgr[int(h * CROP_TOP_FRAC):] if crop_top else bgr
     h, w = img.shape[:2]
     if max(w, h) > MAX_SIDE:
         s = MAX_SIDE / float(max(w, h))
@@ -190,11 +191,13 @@ def enabled():
     return os.environ.get("DIYKEY_VLM", "off").strip().lower() in ("mlx", "transformers")
 
 
-def describe(bgr, backend=None):
+def describe(bgr, backend=None, context=None, crop_top=True):
     """Describe one BGR frame; None when off, unavailable or on any error.
 
     backend: an injected callable(rgb, prompt) -> str (tests), otherwise chosen
     by DIYKEY_VLM with the model from DIYKEY_VLM_MODEL.
+    context: extra instructions appended to PROMPT for this call only (what triggered the
+    event, what to ignore). crop_top: see preprocess.
     """
     try:
         if backend is None:
@@ -207,9 +210,10 @@ def describe(bgr, backend=None):
             backend = _get_backend(name, os.environ.get("DIYKEY_VLM_MODEL", ""))
             if backend is None:
                 return None
-        rgb = preprocess(bgr)
+        rgb = preprocess(bgr, crop_top=crop_top)
+        prompt = f"{PROMPT}\n{context}" if context else PROMPT
         with _lock:
-            raw = backend(rgb, PROMPT)
+            raw = backend(rgb, prompt)
         return postprocess(raw) or None
     except Exception as e:
         log.warning("VLM describe failed: %s", e)
