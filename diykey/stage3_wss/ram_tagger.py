@@ -81,6 +81,33 @@ KIND_WORDS = {
 SPECIES = KIND_WORDS["animal"] - {"animal", "pet", "wildlife"}
 
 
+# CLIP as a second opinion on a claimed animal. Real crops 2026-11-09 (3 frames each, labels =
+# SPECIES + "animal" + NOT_ANIMAL): the 18:35 Driveway crack read "crack in the pavement" 0.99 in
+# every frame, where COCO said airplane and RAM++ bird/skier/person; two Backyard raccoons (02:24,
+# 02:30) never had a non-animal label above 0.30. Species from CLIP alone were right in only 3 of
+# 6 raccoon frames (bear/cat otherwise), so CLIP vetoes here and does not name species.
+NOT_ANIMAL = ("crack in the pavement", "stain on the pavement", "empty yard", "empty driveway",
+              "shadow", "pile of leaves", "tree stump", "garbage bin", "blanket", "person", "car",
+              "bicycle")
+ANIMAL_LABELS = tuple(sorted(SPECIES)) + ("animal",)
+
+
+def clip_veto_threshold():
+    """DIYKEY_CLIP_VETO: the CLIP probability of "not an animal" that removes a claimed animal's
+    animal tags (default 0.9; 0 turns the check off)."""
+    try:
+        return float(os.environ.get("DIYKEY_CLIP_VETO") or 0.9)
+    except ValueError:
+        return 0.9
+
+
+def not_animal_prob(image_vec):
+    """CLIP's probability that a crop is one of NOT_ANIMAL rather than an animal; None without
+    CLIP."""
+    probs = clip_embed.label_probs(image_vec, ANIMAL_LABELS + NOT_ANIMAL)
+    return None if probs is None else sum(probs[label] for label in NOT_ANIMAL)
+
+
 def _species_min_px():
     try:
         return int(os.environ.get("DIYKEY_SPECIES_MIN_PX") or 160)
@@ -432,19 +459,31 @@ def thumbnail_tags(tagger, objects, frame_tags=None):
         tags, supported = crop_tags(tagger, o["img"], hint, frame_tags)
         entry = {"trackerID": int(o["trackerID"]), "keyMomentMs": int(o["keyMomentMs"]),
                  "tags": tags}
-        # Blend before the umbrella tag: DIYKEY_CLIP_TAG_BLEND was tuned on "a photo of car,
-        # night", not "car, night, vehicle".
-        emb = clip_embed.blend(clip_embed.image_embed(o["img"]), [t["tag"] for t in entry["tags"]])
-        if emb:
-            entry["imgEmbed"] = emb
         obj_type = str(hint.get("objectType") or (hint.get("attributes") or {})
                        .get("objectType") or "").lower()
+        raw = clip_embed.image_embed(o["img"])
+        veto = clip_veto_threshold()
+        if obj_type == "animal" and raw and veto > 0:
+            p = not_animal_prob(raw)
+            if p is not None and p >= veto:
+                animal_words = SPECIES | {COCO_TO_RAM.get(lbl, lbl) for lbl in FAMILY["animal"]} \
+                    | {"animal"}
+                dropped = [t["tag"] for t in entry["tags"] if t["tag"] in animal_words]
+                entry["tags"] = [t for t in entry["tags"] if t["tag"] not in animal_words]
+                supported = False
+                log.info("tracker %s: CLIP says not an animal (%.2f >= DIYKEY_CLIP_VETO=%.2f); "
+                         "dropped %s", entry["trackerID"], p, veto, ", ".join(dropped) or "nothing")
+        # Blend before the umbrella tag: DIYKEY_CLIP_TAG_BLEND was tuned on "a photo of car,
+        # night", not "car, night, vehicle".
+        emb = clip_embed.blend(raw, [t["tag"] for t in entry["tags"]])
+        if emb:
+            entry["imgEmbed"] = emb
         reid = reid_model.embed(o["img"]) if obj_type == "person" else None
         if reid:
             entry["reidEmbed"] = reid
         umbrella = UMBRELLA.get(obj_type)
         if umbrella and not supported:
-            log.info("tracker %s: Protect says %s but neither detector saw one on the crop "
+            log.info("tracker %s: Protect says %s but our models don't back it "
                      "(tags %s); not tagged %s", entry["trackerID"], obj_type,
                      ", ".join(t["tag"] for t in entry["tags"]) or "none", umbrella)
         elif umbrella and all(t["tag"] != umbrella for t in entry["tags"]):
