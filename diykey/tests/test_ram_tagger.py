@@ -48,6 +48,40 @@ class RamImagesTest(unittest.TestCase):
                                       objects=objects, roi_meta=[{"ts": 1000, "roi": [roi]}])
         self.assertEqual([t["trackerID"] for t in res["thumbnailTags"]], [5])
 
+    def test_profile_counts_frames_crops_and_models(self):
+        roi = {"coord": [100, 100, 300, 600], "objectType": "person", "trackerId": 5}
+        objects = [{"trackerID": 5, "keyMomentMs": 1000, "img": cv2.imread(self.path), "hint": roi}]
+        ram_tagger.prof_reset()
+        ram_tagger.build_result(FakeTagger(), "cam", "ev", {1000: self.path}, objects=objects)
+        stats = ram_tagger.prof_take()
+        self.assertEqual({k: v[1] for k, v in stats.items()},
+                         {"ramframes": 1, "crops": 1, "clip": 1, "reid": 1})
+        self.assertRegex(ram_tagger.prof_format(stats),
+                         r"^ramframes=1 crops=1 clip=\d+/1 reid=\d+/1$")
+
+    def test_profile_off_outside_a_task(self):
+        ram_tagger.prof_take()
+        ram_tagger.build_result(FakeTagger(), "cam", "ev", {1000: self.path})
+        self.assertEqual(ram_tagger.prof_take(), {})
+
+    def test_ram_plus_call_is_timed_even_when_disabled(self):
+        plus = ram_tagger.RamPlus("/nonexistent/ram_plus.onnx")
+        plus._failed = True
+        ram_tagger.prof_reset()
+        self.assertEqual(plus.tags(cv2.imread(self.path)), {})
+        self.assertEqual(ram_tagger.prof_take()["ramplus"][1], 1)
+
+    def test_colour_goes_on_the_vehicle(self):
+        tags = lambda *n: [{"tag": t, "confScore": 0.9} for t in n]
+        # Live 2026-11-10 08:44 Driveway gave "Red road, car, drive, ...".
+        self.assertEqual(ram_tagger.describe(tags("road", "red", "car", "curb")),
+                         "Road, red car and curb detected.")
+        # 08:43: scene memory dropped the parked car, leaving "Red woman, road, ...".
+        self.assertEqual(ram_tagger.describe(tags("red", "woman", "road")),
+                         "Woman and road detected.")
+        self.assertEqual(ram_tagger.describe(tags("white", "pickup truck")),
+                         "White pickup truck detected.")
+
     def test_build_result_without_roi(self):
         res = ram_tagger.build_result(FakeTagger(), "cam", "ev", {1000: self.path})
         self.assertIsInstance(res, dict)

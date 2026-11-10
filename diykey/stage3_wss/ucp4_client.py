@@ -1093,6 +1093,7 @@ class _StageTimer:
         self.start = self.last = time.monotonic()
         self.stages = {}
         self.frames = 0
+        self.detail = ""  # inside the tags stage: ram_tagger.prof_format
 
     def mark(self, name):
         now = time.monotonic()
@@ -1120,7 +1121,8 @@ def _handle_recognize(console_host, mac_nosep, body):
                  "wait=%d total=%d %s", body.get("event"), body.get("camera"),
                  body.get("ramType"), ",".join(objects) or "-", ",".join(metas) or "-",
                  timer.frames, getattr(_task_ctx, "wait_ms", 0), timer.total_ms(),
-                 " ".join(f"{name}={ms:.0f}" for name, ms in timer.stages.items()))
+                 " ".join([f"{name}={ms:.0f}" for name, ms in timer.stages.items()]
+                          + ([timer.detail] if timer.detail else [])))
 
 
 def _recognize(console_host, mac_nosep, body, timer):
@@ -1134,8 +1136,12 @@ def _recognize(console_host, mac_nosep, body, timer):
     req_url = body.get("reqUrl")
     if body.get("ramType") in ("image", "multipleImages") and STATE_DIR:
         # Retroactive processing (and image RAM): cropped JPEGs by imageId, no clip.
-        result = _recognize_images(console_host, mac_nosep, body)
-        timer.mark("tags")
+        ram_tagger.prof_reset()
+        try:
+            result = _recognize_images(console_host, mac_nosep, body)
+        finally:
+            timer.mark("tags")
+            timer.detail = ram_tagger.prof_format(ram_tagger.prof_take())
     elif req_url and STATE_DIR:
         t0 = time.monotonic()
         clips_dir = os.path.join(STATE_DIR, "clips")
@@ -1164,6 +1170,7 @@ def _recognize(console_host, mac_nosep, body, timer):
                 scene = scene_memory.observe(STATE_DIR, tagger, camera_id, event_id, ram_frames,
                                              _event_triggers(body))
                 timer.mark("scene")
+                ram_tagger.prof_reset()
                 try:
                     # Only Protect's key moments/thumbnails: a keyMomentsTags row per extra
                     # face/plate grab would be a key moment Protect never asked about.
@@ -1176,6 +1183,7 @@ def _recognize(console_host, mac_nosep, body, timer):
                 except Exception as e:  # noqa: BLE001
                     log.warning("RAM tagging failed for event %s: %r", event_id, e)
                 timer.mark("tags")
+                timer.detail = ram_tagger.prof_format(ram_tagger.prof_take())
             if metas:
                 _add_face_lpr(parts, images, metas, frames, meta_start, camera_id, event_id,
                               face_meta=face_meta)

@@ -28,6 +28,41 @@ import reid_model
 
 log = logging.getLogger("diykey.ram")
 
+# Per-model time inside one task's tags stage, for its timing log line. Live 2026-11-09: tags was
+# 24 s median of 36 s per event and swung 8.7-43 s on the same camera with the same 2 frames, but
+# one timer could not say whether YOLO, RAM++, CLIP or the crop count was to blame. Thread-local:
+# each task runs build_result on its own worker thread; nothing is counted until prof_reset().
+_prof = threading.local()
+
+
+def prof_reset():
+    _prof.stats = {}
+
+
+def prof_take():
+    """{name: [ms, calls]} since prof_reset() on this thread; counting stops."""
+    stats = getattr(_prof, "stats", None) or {}
+    _prof.stats = None
+    return stats
+
+
+def _prof_add(name, t0, calls=1):
+    stats = getattr(_prof, "stats", None)
+    if stats is not None:
+        s = stats.setdefault(name, [0.0, 0])
+        s[0] += (time.monotonic() - t0) * 1000 if t0 is not None else 0
+        s[1] += calls
+
+
+_PROF_COUNTS = ("ramframes", "crops")  # counted, not timed
+
+
+def prof_format(stats):
+    """'ramframes=2 crops=2 yolo=310/4 ramplus=9120/4 ...': counts first, then ms/calls."""
+    counts = [f"{k}={stats[k][1]}" for k in _PROF_COUNTS if k in stats]
+    return " ".join(counts + [f"{k}={ms:.0f}/{n}" for k, (ms, n) in stats.items()
+                              if k not in _PROF_COUNTS])
+
 # COCO name -> Protect RAM tag; None = no supported tag for it.
 COCO_TO_RAM = {
     "airplane": "plane", "suitcase": "luggage", "skis": "ski", "toilet": "toilet bowl",
@@ -217,6 +252,13 @@ class RamPlus:
     def tags(self, img_bgr):
         """{tag: probability} for one image: tags above their per-class threshold that Protect
         knows, best max_tags by probability. {} when the model cannot load."""
+        t0 = time.monotonic()
+        try:
+            return self._tags(img_bgr)
+        finally:
+            _prof_add("ramplus", t0)  # includes waiting for the lock (warm-up, scene memory)
+
+    def _tags(self, img_bgr):
         with self._lock:
             if self._failed:
                 return {}
@@ -294,9 +336,11 @@ class RamTagger:
 
     def detect(self, img_bgr):
         """[(label, score, (x, y, w, h) in image pixels)], after NMS."""
+        t0 = time.monotonic()
         canvas, scale, left, top = self._letterbox(img_bgr)
         x = cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB).transpose(2, 0, 1)[None].astype(np.float32) / 255
         out = self.session.run(None, {self.input_name: x})[0][0].T  # [N, 4 + classes]
+        _prof_add("yolo", t0)
         scores = out[:, 4:]
         cls = scores.argmax(1)
         best = scores[np.arange(len(cls)), cls]
@@ -418,14 +462,23 @@ COLOURS = {"white", "black", "grey", "gray", "silver", "red", "blue", "green", "
            "orange", "brown", "purple", "pink", "beige", "gold"}
 
 
+# What a lone colour tag can describe. It is the vehicle's (camera attribute or RAM++ on the
+# frame); clothing colours come as one tag ("black jacket"). Live 2026-11-10 08:43-08:45 Driveway:
+# put on the first thing it gave "Red road, car" and, once scene memory dropped the parked car,
+# "Red woman".
+_COLOURABLE = {"car", "vehicle"} | PLUS_VEHICLE_ONLY | PLUS_VEHICLE_KINDS
+
+
 def describe(tags):
-    """One sentence from the tags, e.g. "Person and car detected at night." or "White car
-    detected." (a colour tag goes in front of the first thing it can describe)."""
+    """One sentence from the tags, e.g. "Person and car detected at night." or "Person and
+    white car detected." (a colour tag goes in front of the first vehicle; with none it is left
+    out)."""
     names = [t["tag"] for t in tags if t["tag"] != NIGHT_TAG]
     colours = [n for n in names if n in COLOURS]
     things = [n for n in names if n not in COLOURS]
-    if colours and things:
-        things[0] = f"{colours[0]} {things[0]}"
+    target = next((i for i, n in enumerate(things) if n in _COLOURABLE), None)
+    if colours and target is not None:
+        things[target] = f"{colours[0]} {things[target]}"
     when = " at night" if any(t["tag"] == NIGHT_TAG for t in tags) else ""
     if not things:
         return f"Motion detected{when}."
@@ -455,16 +508,21 @@ def thumbnail_tags(tagger, objects, frame_tags=None):
     for o in objects:
         if o.get("img") is None:
             continue
+        _prof_add("crops", None)
         hint = o.get("hint") or {}
         tags, supported = crop_tags(tagger, o["img"], hint, frame_tags)
         entry = {"trackerID": int(o["trackerID"]), "keyMomentMs": int(o["keyMomentMs"]),
                  "tags": tags}
         obj_type = str(hint.get("objectType") or (hint.get("attributes") or {})
                        .get("objectType") or "").lower()
+        t0 = time.monotonic()
         raw = clip_embed.image_embed(o["img"])
+        _prof_add("clip", t0)
         veto = clip_veto_threshold()
         if obj_type == "animal" and raw and veto > 0:
+            t0 = time.monotonic()
             p = not_animal_prob(raw)
+            _prof_add("veto", t0)
             if p is not None and p >= veto:
                 animal_words = SPECIES | {COCO_TO_RAM.get(lbl, lbl) for lbl in FAMILY["animal"]} \
                     | {"animal"}
@@ -478,7 +536,11 @@ def thumbnail_tags(tagger, objects, frame_tags=None):
         emb = clip_embed.blend(raw, [t["tag"] for t in entry["tags"]])
         if emb:
             entry["imgEmbed"] = emb
-        reid = reid_model.embed(o["img"]) if obj_type == "person" else None
+        reid = None
+        if obj_type == "person":
+            t0 = time.monotonic()
+            reid = reid_model.embed(o["img"])
+            _prof_add("reid", t0)
         if reid:
             entry["reidEmbed"] = reid
         umbrella = UMBRELLA.get(obj_type)
@@ -529,6 +591,7 @@ def build_result(tagger, camera_id, event_id, frames, pre_ms=0, hints=None, obje
         if img is None:
             log.warning("could not read frame %s", frames[ms])
             continue
+        _prof_add("ramframes", None)
         hint = (hints or {}).get(ms)
         tags = tag_crop(tagger, img, hint) if hint else tagger.tag_frame(img)
         km = {"keyMomentMs": int(ms), "tags": tags}
