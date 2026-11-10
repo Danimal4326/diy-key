@@ -763,6 +763,21 @@ class TestRecognizeTiming(_RecognizeTest):
             self._run(self._body())
         self.assertNotIn("clip=", self._timing(cm))
 
+    def test_tags_stage_breakdown_is_appended(self):
+        ram = {"cameraId": "cam1", "eventId": "ev1", "description": "a car", "keyMomentsTags": []}
+
+        def build(*a, **k):
+            ucp4_client.ram_tagger._prof_add("crops", None)
+            ucp4_client.ram_tagger._prof_add("ramplus", time.monotonic())
+            return ram
+
+        with mock.patch.object(ucp4_client, "_get_tagger", return_value=mock.Mock()), \
+                mock.patch.object(ucp4_client.ram_tagger, "build_result", side_effect=build), \
+                self.assertLogs(ucp4_client.log, "INFO") as cm:
+            self._run(self._body())
+        line = self._timing(cm)
+        self.assertRegex(line, r" tags=\d+ .*crops=1 ramplus=\d+/1$")
+
     def test_worker_records_the_wait_before_running_the_task(self):
         seen, done = [], threading.Event()
 
