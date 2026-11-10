@@ -817,6 +817,7 @@ class TestWarmModels(unittest.TestCase):
         with mock.patch.dict(os.environ, env), \
                 mock.patch.object(c.clip_embed, "enabled", return_value=on), \
                 mock.patch.object(c.clip_embed, "text_embed", step("clip")), \
+                mock.patch.object(c.clip_embed, "label_matrix", step("labels")), \
                 mock.patch.object(c.vlm_describe, "enabled", return_value=on), \
                 mock.patch.object(c.vlm_describe, "describe", describe or step("vlm")), \
                 mock.patch.object(c.reid_model, "enabled", return_value=on), \
@@ -831,7 +832,7 @@ class TestWarmModels(unittest.TestCase):
 
     def test_every_enabled_model_with_ram_plus_last(self):
         self.assertEqual(self._run(self.ALL),
-                         ["clip", "vlm", "reid", "face", "enhance", "lpr", "ram"])
+                         ["clip", "labels", "vlm", "reid", "face", "enhance", "lpr", "ram"])
 
     def test_disabled_models_are_skipped(self):
         env = {k: "0" for k in self.ALL}

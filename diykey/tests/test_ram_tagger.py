@@ -374,5 +374,83 @@ class SpeciesTest(unittest.TestCase):
         self.assertNotIn("bear", names)
 
 
+class ClipVetoTest(unittest.TestCase):
+    """Real crops 2026-11-09: the Driveway crack read "crack in the pavement" 0.99 under CLIP in
+    every frame; raccoons never above 0.30 for any non-animal label."""
+    NAMES = ["cat", "dog", "bird", "fence", "man"]
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        env = unittest.mock.patch.dict(os.environ)
+        env.start()
+        self.addCleanup(env.stop)
+        for k in ("DIYKEY_TRUST_CLAIMED_TYPE", "DIYKEY_REID_MODEL", "DIYKEY_CLIP_VETO"):
+            os.environ.pop(k, None)
+        for target, value in (("clip_embed.image_embed", lambda img: [1.0, 0.0]),
+                              ("clip_embed.blend", lambda vec, tags: vec)):
+            p = unittest.mock.patch(target, value)
+            p.start()
+            self.addCleanup(p.stop)
+        self.img = np.full((110, 400, 3), 100, np.uint8)
+
+    def thumb(self, p_not, hint=None, coco=("bear",), probs=(0.8, 0.1, 0.1, 0.1, 0.1)):
+        plus = make_plus(self.tmp.name, list(probs), set(self.NAMES), names=self.NAMES,
+                         thresholds=[0.5] * 5)
+        hint = hint or {"objectType": "animal", "confidence": 91}
+        with unittest.mock.patch("ram_tagger.not_animal_prob", lambda vec: p_not):
+            thumb, = ram_tagger.thumbnail_tags(CocoTagger(list(coco), plus),
+                                               [{"trackerID": 7, "keyMomentMs": 1,
+                                                 "img": self.img, "hint": hint}], {"cat"})
+        return [t["tag"] for t in thumb["tags"]], thumb
+
+    def test_confident_not_animal_drops_every_animal_tag(self):
+        tags, thumb = self.thumb(0.99)
+        for t in ("animal", "cat", "bear"):
+            self.assertNotIn(t, tags)
+        self.assertEqual(thumb["imgEmbed"], [1.0, 0.0])  # the crop still gets a search row
+
+    def test_below_threshold_keeps_them(self):
+        tags, _ = self.thumb(0.55)  # raccoon 02:30 -1 s: shadow/stump/stain added to ~0.5
+        self.assertIn("animal", tags)
+        self.assertIn("cat", tags)
+
+    def test_threshold_from_env_and_zero_turns_it_off(self):
+        os.environ["DIYKEY_CLIP_VETO"] = "0.5"
+        self.assertNotIn("animal", self.thumb(0.55)[0])
+        os.environ["DIYKEY_CLIP_VETO"] = "0"
+        self.assertIn("animal", self.thumb(0.99)[0])
+
+    def test_only_claimed_animals_are_checked(self):
+        tags, _ = self.thumb(0.99, hint={"objectType": "person", "confidence": 80},
+                             probs=(0.1, 0.1, 0.1, 0.1, 0.9))
+        self.assertIn("person", tags)
+
+    def test_without_clip_nothing_is_vetoed(self):
+        with unittest.mock.patch("clip_embed.image_embed", lambda img: None):
+            tags, thumb = self.thumb(0.99)
+        self.assertIn("animal", tags)
+        self.assertNotIn("imgEmbed", thumb)
+
+
+class LabelProbsTest(unittest.TestCase):
+    def test_softmax_over_cached_label_vectors(self):
+        import clip_embed
+        axes = {"crack in the pavement": [1.0, 0.0], "cat": [0.0, 1.0]}
+
+        def fake_text(text):
+            return next(v for k, v in axes.items() if k in text)
+
+        clip_embed._label_cache.clear()
+        self.addCleanup(clip_embed._label_cache.clear)
+        with unittest.mock.patch("clip_embed.text_embed", side_effect=fake_text) as te:
+            probs = clip_embed.label_probs([0.995, 0.0999], ["crack in the pavement", "cat"])
+            clip_embed.label_probs([0.0, 1.0], ["crack in the pavement", "cat"])
+        self.assertAlmostEqual(sum(probs.values()), 1.0, places=6)
+        self.assertGreater(probs["crack in the pavement"], 0.99)
+        self.assertEqual(te.call_count, 2 * len(clip_embed.LABEL_TEMPLATES))  # cached after one set
+        self.assertIsNone(clip_embed.label_probs(None, ["cat"]))
+
+
 if __name__ == "__main__":
     unittest.main()

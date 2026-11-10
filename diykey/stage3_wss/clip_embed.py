@@ -89,6 +89,42 @@ def text_embed(text):
     return _unit(feats.float().cpu().numpy())
 
 
+# Zero-shot labelling (ram_tagger.not_animal_prob): each label is the mean of these prompts, as
+# in CLIP's own zero-shot recipe; the second covers IR night crops, which most of ours are. Both
+# have 3+ words, so text_embed adds no prefix. Text vectors are cached per label set.
+LABEL_TEMPLATES = ("a photo of a {}.", "a black and white night photo of a {}.")
+_label_cache = {}
+
+
+def label_matrix(labels):
+    """Unit text vectors, one row per label (cached), or None without CLIP."""
+    key = tuple(labels)
+    if key not in _label_cache:
+        rows = []
+        for label in labels:
+            vecs = [text_embed(t.format(label)) for t in LABEL_TEMPLATES]
+            if any(v is None for v in vecs):
+                return None
+            v = np.mean(np.asarray(vecs, np.float32), 0)
+            rows.append(v / np.linalg.norm(v))
+        _label_cache[key] = np.stack(rows)
+    return _label_cache[key]
+
+
+def label_probs(image_vec, labels):
+    """{label: probability} for a unit image vector over these labels (softmax of 100 x cosine,
+    CLIP's logit scale), or None without CLIP or an image vector."""
+    if not image_vec:
+        return None
+    m = label_matrix(labels)
+    if m is None:
+        return None
+    logits = 100.0 * (m @ np.asarray(image_vec, np.float32))
+    p = np.exp(logits - logits.max())
+    p /= p.sum()
+    return dict(zip(labels, (float(x) for x in p)))
+
+
 def protect_similarity(object_vec, query_vec):
     """Protect's similarity in percent, as AI Key Advanced alarms score it: pgvector
     `(1 - (a <=> b) - 0.08) / 0.32`, `<=>` being cosine distance, and the rule fires when

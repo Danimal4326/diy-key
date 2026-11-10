@@ -1032,6 +1032,9 @@ def _warm_models():
     blank = np.zeros((256, 256, 3), np.uint8)
     if clip_embed.enabled():
         _warm_one("CLIP", lambda: clip_embed.text_embed("warm up"))
+        # The not-an-animal labels: ~90 text encodings, otherwise paid by the first animal crop.
+        _warm_one("CLIP labels", lambda: clip_embed.label_matrix(
+            ram_tagger.ANIMAL_LABELS + ram_tagger.NOT_ANIMAL))
     if vlm_describe.enabled():
         _warm_one("VLM", lambda: vlm_describe.describe(blank))
     if reid_model.enabled():
