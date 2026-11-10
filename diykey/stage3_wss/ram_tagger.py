@@ -48,6 +48,59 @@ ATTR_TO_RAM = {"grey": "gray", "bike": "bicycle"}
 # an object of that type, so a "suv" or "deer" rule can still match a crop the detector called
 # "car" or nothing at all.
 UMBRELLA = {"person": "person", "vehicle": "vehicle", "animal": "animal"}
+# ...but only when one of our own models backs the type up (claimed_type_supported). Live
+# 2026-11-09 18:35:45 Driveway (event fe952e5c, tracker 2818): diy-port called a crack junction in
+# the pavement "animal" (82, box static for all 21 s of the clip); RAM++ tagged the frame crack 0.88
+# and found no animal on the crop, yet the row went out tagged animal 0.82, so animal alarm rules and
+# tag search matched a crack. 14 Driveway "animal" detections that week, most with crack tags.
+# Words that back each type when RAM++ finds them on the crop: the ones that are both RAM++ tags
+# and enabled rows of Protect's ram_tags.csv (7.3.70; RamPlus.tags drops the rest).
+KIND_WORDS = {
+    "person": frozenset({"person", "man", "woman", "boy", "girl", "child", "pedestrian", "baby",
+                         "toddler"}),
+    "vehicle": frozenset({"car", "vehicle", "sedan", "suv", "truck", "van", "bus", "motorcycle",
+                          "bicycle", "taxi", "police car", "ambulance", "fire truck", "school bus",
+                          "tow truck", "jeep", "scooter"}),
+    "animal": frozenset({"animal", "dog", "cat", "bird", "deer", "squirrel", "raccoon", "fox",
+                         "rabbit", "horse", "cow", "sheep", "bear", "coyote", "goose", "duck", "pet",
+                         "wildlife", "rat", "mouse", "crow", "pigeon", "turkey", "moose", "wolf",
+                         "hen", "chicken", "owl", "eagle", "insect", "butterfly", "frog", "snake",
+                         "turtle"}),
+}
+
+
+# Species on an animal crop. plus_filter keeps only words Protect turns into a filter label, which
+# has no species, so a RAM++ "cat" never reached the object row that search queries. Live
+# 2026-11-09 18:27:07 Doorbell (event 9be8c45f, tracker 74537): the summary said "A cat
+# walking through a gate" and the whole frame was tagged cat 0.90, but the object went out as
+# animal/night/bear 0.62 (COCO's guess), so Find Anything and Spotlight found no cat.
+# A crop's species is kept only when the event's whole-frame tags name it too: on tiny crops
+# RAM++ invents animals (2026-11-09 18:35 Driveway crack crop: bird 0.83, skier, diver; the whole
+# frame said crack and pavement). A size floor would not separate the two (crack crop ~205x105 px).
+# Without whole frames (image tasks), the crop's short side must reach DIYKEY_SPECIES_MIN_PX.
+SPECIES = KIND_WORDS["animal"] - {"animal", "pet", "wildlife"}
+
+
+def _species_min_px():
+    try:
+        return int(os.environ.get("DIYKEY_SPECIES_MIN_PX") or 160)
+    except ValueError:
+        return 160
+
+
+def agreed_species(raw_plus, img_bgr, frame_tags):
+    """{species: score} from a crop's RAM++ tags that may stand: named by the event's whole
+    frames too, or (no frames, frame_tags None) from a crop big enough to trust on its own."""
+    found = {t: s for t, s in (raw_plus or {}).items() if t in SPECIES}
+    if frame_tags is not None:
+        return {t: s for t, s in found.items() if t in frame_tags}
+    return found if min(img_bgr.shape[:2]) >= _species_min_px() else {}
+
+
+def _trust_claimed_type():
+    """DIYKEY_TRUST_CLAIMED_TYPE=1: tag every crop with Protect's type, as before 2026-11-09."""
+    return (os.environ.get("DIYKEY_TRUST_CLAIMED_TYPE") or "").strip().lower() in (
+        "1", "true", "yes", "on")
 
 
 # RAM++ tags only meaningful on one kind of object: dropped from crops of another kind (a "man"
@@ -254,10 +307,29 @@ FAMILY = {
 }
 
 
-def tag_crop(tagger, img_bgr, hint):
+def claimed_type_supported(object_type, coco_tags, plus_tags, plus_ran, camera_typed=False):
+    """Whether a crop may carry Protect's claimed type as a tag (tag_crop's object_type and
+    thumbnail_tags' umbrella). Yes when COCO found a label of that family on the crop, RAM++ found
+    one of KIND_WORDS, or the camera classified the vehicle itself; also whenever RAM++ did not
+    run (no second opinion), for types without a word list, and with DIYKEY_TRUST_CLAIMED_TYPE=1.
+    No only when RAM++ looked at the crop and saw nothing of that kind (see KIND_WORDS)."""
+    words = KIND_WORDS.get(object_type)
+    if words is None or not plus_ran or camera_typed or _trust_claimed_type():
+        return True
+    family_tags = {COCO_TO_RAM.get(lbl, lbl) for lbl in FAMILY.get(object_type, ())}
+    return any(t in family_tags for t in coco_tags) or any(t in words for t in plus_tags or ())
+
+
+def tag_crop(tagger, img_bgr, hint, frame_tags=None):
     """Tags for a crop of one tracked object. hint is the task's image entry: objectType plus the
     camera's attributes (vehicleType, color). Detector labels outside the object's family are
-    dropped (car crops read as boat/train), and the camera's own attributes are added."""
+    dropped (car crops read as boat/train), and the camera's own attributes are added.
+    frame_tags: tag names from the event's whole frames, or None (see agreed_species)."""
+    return crop_tags(tagger, img_bgr, hint, frame_tags)[0]
+
+
+def crop_tags(tagger, img_bgr, hint, frame_tags=None):
+    """(tag_crop's tags, claimed_type_supported for this crop)."""
     object_type = str(hint.get("objectType") or (hint.get("attributes") or {}).get("objectType")
                       or "").lower()
     family = FAMILY.get(object_type)
@@ -265,29 +337,47 @@ def tag_crop(tagger, img_bgr, hint):
     family_tags = {COCO_TO_RAM.get(lbl, lbl) for lbl in family or ()}
     found = {}
     plus = getattr(tagger, "plus", None)
-    for t in (tagger.tag_frame(img_bgr, plus=False) if plus else tagger.tag_frame(img_bgr)):
+    coco = tagger.tag_frame(img_bgr, plus=False) if plus else tagger.tag_frame(img_bgr)
+    for t in coco:
         if t["tag"] == NIGHT_TAG or family is None:
             found[t["tag"]] = t["confScore"]
         elif t["tag"] in family_tags and not (attrs.get("vehicleType") or {}).get("val") \
                 and not any(k in family_tags for k in found):
             found[t["tag"]] = t["confScore"]  # one object: only the best label of its family
+    raw_plus = {}
     if plus:
         # RAM++ on the crop: gender, clothing, accessories, vehicle body type. Added after the
         # family filter above (which exists to stop COCO's wrong-class guesses on crops).
-        extra = plus_filter(plus.tags(img_bgr), object_type)
+        raw_plus = plus.tags(img_bgr)
+        extra = plus_filter(raw_plus, object_type)
         if (attrs.get("vehicleType") or {}).get("val"):  # the camera already named the body type
             extra = {t: v for t, v in extra.items() if t not in PLUS_VEHICLE_ONLY}
         for tag, score in extra.items():
             found[tag] = max(found.get(tag, 0), round(score, 3))
+    species = agreed_species(raw_plus, img_bgr, frame_tags) if object_type == "animal" else {}
+    if species:
+        # One animal, one species: RAM++'s agreed word replaces COCO's family guess (bear on a cat).
+        best = max(species, key=species.get)
+        for t in family_tags:
+            found.pop(t, None)
+        found[best] = round(species[best], 3)
     for key in ("vehicleType", "color"):
         val = (attrs.get(key) or {}).get("val")
         if val:
             conf = round(min(1.0, (attrs[key].get("confidence") or 0) / 100), 3)
             tag = ATTR_TO_RAM.get(str(val).lower(), str(val).lower())
             found[tag] = max(found.get(tag, 0), conf)
-    if object_type and object_type not in ("vehicle",) and object_type not in found:
+    # RAM++ species words back "animal" only under the same agreement rule.
+    evidence = {t: s for t, s in raw_plus.items() if t not in SPECIES or t in species} \
+        if object_type == "animal" else raw_plus
+    supported = claimed_type_supported(
+        object_type, [t["tag"] for t in coco], evidence,
+        plus_ran=bool(plus) and not getattr(plus, "_failed", False),
+        camera_typed=object_type == "vehicle" and bool((attrs.get("vehicleType") or {}).get("val")))
+    if supported and object_type and object_type not in ("vehicle",) and object_type not in found:
         found[object_type] = round((hint.get("confidence") or 0) / 100, 3)
-    return [{"tag": t, "confScore": c} for t, c in sorted(found.items(), key=lambda kv: -kv[1])]
+    tags = [{"tag": t, "confScore": c} for t, c in sorted(found.items(), key=lambda kv: -kv[1])]
+    return tags, supported
 
 
 def is_greyscale(img_bgr, tol=3.0):
@@ -326,7 +416,7 @@ def crop_box(img, coord, margin=0.1):
     return img[y0:y1, x0:x1] if x1 - x0 >= 8 and y1 - y0 >= 8 else None
 
 
-def thumbnail_tags(tagger, objects):
+def thumbnail_tags(tagger, objects, frame_tags=None):
     """thumbnailTags for tracked objects: [{trackerID, keyMomentMs, img, hint}] ->
     [{trackerID, keyMomentMs, tags, imgEmbed?, reidEmbed?}]. Protect stores an object's row in
     the AI Key's ramDetections (what search queries) only when it carries imgEmbed, matched to
@@ -339,8 +429,9 @@ def thumbnail_tags(tagger, objects):
         if o.get("img") is None:
             continue
         hint = o.get("hint") or {}
+        tags, supported = crop_tags(tagger, o["img"], hint, frame_tags)
         entry = {"trackerID": int(o["trackerID"]), "keyMomentMs": int(o["keyMomentMs"]),
-                 "tags": tag_crop(tagger, o["img"], hint)}
+                 "tags": tags}
         # Blend before the umbrella tag: DIYKEY_CLIP_TAG_BLEND was tuned on "a photo of car,
         # night", not "car, night, vehicle".
         emb = clip_embed.blend(clip_embed.image_embed(o["img"]), [t["tag"] for t in entry["tags"]])
@@ -352,7 +443,11 @@ def thumbnail_tags(tagger, objects):
         if reid:
             entry["reidEmbed"] = reid
         umbrella = UMBRELLA.get(obj_type)
-        if umbrella and all(t["tag"] != umbrella for t in entry["tags"]):
+        if umbrella and not supported:
+            log.info("tracker %s: Protect says %s but neither detector saw one on the crop "
+                     "(tags %s); not tagged %s", entry["trackerID"], obj_type,
+                     ", ".join(t["tag"] for t in entry["tags"]) or "none", umbrella)
+        elif umbrella and all(t["tag"] != umbrella for t in entry["tags"]):
             entry["tags"].append({"tag": umbrella,
                                   "confScore": round((hint.get("confidence") or 50) / 100, 3)})
         out.append(entry)
@@ -404,7 +499,9 @@ def build_result(tagger, camera_id, event_id, frames, pre_ms=0, hints=None, obje
         key_moments.append(km)
         for t in tags:
             merged[t["tag"]] = max(merged.get(t["tag"], 0), t["confScore"])
-    thumbs = thumbnail_tags(tagger, objects or [])
+    # Whole-frame tags vouch for a crop's species (agreed_species); image tasks have no whole frame.
+    frame_tags = set(merged) if key_moments and not hints else None
+    thumbs = thumbnail_tags(tagger, objects or [], frame_tags)
     infer_ms = int((time.monotonic() - t0) * 1000)
     all_tags = [{"tag": t, "confScore": s} for t, s in sorted(merged.items(), key=lambda kv: -kv[1])]
     return {

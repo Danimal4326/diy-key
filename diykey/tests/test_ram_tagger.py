@@ -4,6 +4,7 @@ import os
 import sys
 import tempfile
 import unittest
+import unittest.mock
 
 import cv2
 import numpy as np
@@ -66,11 +67,11 @@ class FakeSession:
         return [self.probs[None]]
 
 
-def make_plus(tmp, probs, vocab, **kw):
+def make_plus(tmp, probs, vocab, names=None, thresholds=None, **kw):
     plus = ram_tagger.RamPlus(os.path.join(tmp, "ram_plus.onnx"), vocab=vocab, **kw)
     plus._session = FakeSession(probs)
-    plus.names = ["man", "sofa", "shirt", "sedan", "glasses"]
-    plus.thresholds = np.array([0.7, 0.7, 0.5, 0.6, 0.9], np.float32)
+    plus.names = names or ["man", "sofa", "shirt", "sedan", "glasses"]
+    plus.thresholds = np.array(thresholds or [0.7, 0.7, 0.5, 0.6, 0.9], np.float32)
     plus.keep = np.array([n in vocab for n in plus.names])
     return plus
 
@@ -187,12 +188,190 @@ class PlusMergeTest(unittest.TestCase):
                          ["accessory:glasses", "clothingType:shirt", "gender:male"])
         self.assertIn("sofa", [t["tag"] for t in res["keyMomentsTags"][0]["tags"]])
 
+    def test_vehicle_umbrella_stays_when_the_camera_typed_it(self):
+        # RAM++ sees no vehicle word here (sedan is below its threshold), COCO only person/car is
+        # dropped for the camera's type: the camera's own classification still backs "vehicle".
+        plus = make_plus(self.tmp.name, [0.8, 0.0, 0.9, 0.1, 0.0], {"man", "shirt", "sedan"})
+        hint = {"objectType": "vehicle", "confidence": 70,
+                "attributes": {"vehicleType": {"val": "suv", "confidence": 80}}}
+        thumb, = ram_tagger.thumbnail_tags(PlusTagger(plus), [{"trackerID": 4, "keyMomentMs": 1,
+                                                               "img": self.img, "hint": hint}])
+        self.assertIn("vehicle", [t["tag"] for t in thumb["tags"]])
+
     def test_labels_port(self):
         self.assertEqual(convert_ram_tags_to_labels("vehicle", ["blue sedan", "bus"]),
                          ["vehicleType:car", "color:blue", "vehicleType:bus"])
         self.assertEqual(convert_ram_tags_to_labels("person", ["black shirt", "woman", "glass"]),
                          ["upperClothingColor:black", "clothingType:shirt", "gender:female",
                           "accessory:glasses"])
+
+
+class CocoTagger:
+    """COCO stand-in returning fixed labels; RAM++ is whatever plus is (None = not loaded)."""
+    def __init__(self, coco, plus=None):
+        self.coco, self.plus = coco, plus
+
+    def tag_frame(self, img, plus=True):
+        return [{"tag": t, "confScore": 0.7} for t in self.coco]
+
+
+class ClaimedTypeTest(unittest.TestCase):
+    """Live 2026-11-09 18:35:45 Driveway: a crack diy-port called "animal" went out tagged
+    animal 0.82 though RAM++ saw crack/pavement and no animal on the crop."""
+    NAMES = ["crack", "pavement", "dog", "man", "night"]
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        env = unittest.mock.patch.dict(os.environ)
+        env.start()
+        self.addCleanup(env.stop)
+        os.environ.pop("DIYKEY_TRUST_CLAIMED_TYPE", None)
+        os.environ.pop("DIYKEY_CLIP", None)
+        os.environ.pop("DIYKEY_REID_MODEL", None)
+        self.img = np.full((61, 67, 3), 110, np.uint8)
+        self.hint = {"objectType": "animal", "confidence": 82, "trackerId": 2818}
+
+    def plus(self, probs):
+        return make_plus(self.tmp.name, probs, set(self.NAMES), names=self.NAMES,
+                         thresholds=[0.5] * 5)
+
+    def thumb(self, tagger, hint=None, frame_tags=None):
+        thumb, = ram_tagger.thumbnail_tags(tagger, [{"trackerID": 2818, "keyMomentMs": 1,
+                                                     "img": self.img, "hint": hint or self.hint}],
+                                           frame_tags)
+        return [t["tag"] for t in thumb["tags"]]
+
+    def test_crack_called_animal_is_not_tagged_animal(self):
+        tagger = CocoTagger([], self.plus([0.88, 0.85, 0.1, 0.1, 0.1]))
+        self.assertNotIn("animal", [t["tag"] for t in ram_tagger.tag_crop(tagger, self.img, self.hint)])
+        self.assertNotIn("animal", self.thumb(tagger))
+
+    def test_ram_plus_animal_word_keeps_it_when_the_frame_agrees(self):
+        tagger = CocoTagger([], self.plus([0.88, 0.1, 0.9, 0.1, 0.1]))
+        self.assertIn("animal", self.thumb(tagger, frame_tags={"dog", "night"}))
+        # The crack's 0 s frame: RAM++ saw a "bird" on the crop that the whole frame never named.
+        self.assertNotIn("animal", self.thumb(tagger, frame_tags={"crack", "pavement"}))
+
+    def test_coco_family_label_keeps_it(self):
+        tagger = CocoTagger(["dog"], self.plus([0.88, 0.85, 0.1, 0.1, 0.1]))
+        tags = self.thumb(tagger)
+        self.assertIn("dog", tags)
+        self.assertIn("animal", tags)
+
+    def test_coco_label_of_another_family_does_not(self):
+        tagger = CocoTagger(["car"], self.plus([0.88, 0.85, 0.1, 0.1, 0.1]))
+        self.assertNotIn("animal", self.thumb(tagger))
+
+    def test_person_needs_a_person_word(self):
+        hint = {"objectType": "person", "confidence": 75}
+        self.assertNotIn("person", self.thumb(CocoTagger([], self.plus([0.9, 0.9, 0, 0, 0])), hint))
+        self.assertIn("person", self.thumb(CocoTagger([], self.plus([0.9, 0, 0, 0.8, 0])), hint))
+
+    def test_without_ram_plus_protect_is_trusted(self):
+        self.assertIn("animal", self.thumb(CocoTagger([])))
+
+    def test_failed_ram_plus_is_no_second_opinion(self):
+        plus = ram_tagger.RamPlus(os.path.join(self.tmp.name, "missing.onnx"))
+        self.assertIn("animal", self.thumb(CocoTagger([], plus)))
+        self.assertTrue(plus._failed)
+
+    def test_env_restores_old_behaviour(self):
+        os.environ["DIYKEY_TRUST_CLAIMED_TYPE"] = "1"
+        self.assertIn("animal", self.thumb(CocoTagger([], self.plus([0.88, 0.85, 0.1, 0.1, 0.1]))))
+
+    def test_image_task_crop_follows_the_same_rule(self):
+        path = os.path.join(self.tmp.name, "crop.jpg")
+        cv2.imwrite(path, self.img)
+        tagger = CocoTagger([], self.plus([0.88, 0.85, 0.1, 0.1, 0.1]))
+        res = ram_tagger.build_result(tagger, "cam", "ev", {1000: path}, hints={1000: self.hint})
+        self.assertNotIn("animal", [t["tag"] for t in res["keyMomentsTags"][0]["tags"]])
+
+    def test_types_without_a_word_list_are_trusted(self):
+        self.assertTrue(ram_tagger.claimed_type_supported("package", [], {}, plus_ran=True))
+
+
+class SpeciesTest(unittest.TestCase):
+    """Live 2026-11-09 18:27:07 Doorbell: summary "A cat walking through a gate", whole
+    frame cat 0.90 / dog 0.95, but the object went out animal/night/bear 0.62, so a search for
+    "cat" found nothing."""
+    NAMES = ["cat", "dog", "bird", "fence", "man"]
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        env = unittest.mock.patch.dict(os.environ)
+        env.start()
+        self.addCleanup(env.stop)
+        for k in ("DIYKEY_TRUST_CLAIMED_TYPE", "DIYKEY_CLIP", "DIYKEY_REID_MODEL",
+                  "DIYKEY_SPECIES_MIN_PX"):
+            os.environ.pop(k, None)
+        self.small = np.full((110, 400, 3), 100, np.uint8)
+        self.hint = {"objectType": "animal", "confidence": 91, "trackerId": 74537}
+
+    def tags(self, coco, probs, frame_tags, img=None):
+        plus = make_plus(self.tmp.name, probs, set(self.NAMES), names=self.NAMES,
+                         thresholds=[0.5] * 5)
+        tags, _ = ram_tagger.crop_tags(CocoTagger(coco, plus),
+                                       self.small if img is None else img, self.hint, frame_tags)
+        return {t["tag"]: t["confScore"] for t in tags}
+
+    def test_doorbell_cat_replaces_coco_bear(self):
+        got = self.tags(["bear"], [0.8, 0.1, 0.1, 0.7, 0.1], {"cat", "dog", "fence", "night"})
+        self.assertEqual(got.get("cat"), 0.8)
+        self.assertNotIn("bear", got)
+        self.assertIn("animal", got)
+        self.assertNotIn("fence", got)  # still not a label tag on a crop
+
+    def test_one_species_per_animal(self):
+        got = self.tags([], [0.8, 0.9, 0.1, 0.1, 0.1], {"cat", "dog"})
+        self.assertIn("dog", got)
+        self.assertNotIn("cat", got)
+
+    def test_species_the_frame_never_named_is_dropped(self):
+        got = self.tags(["bear"], [0.1, 0.1, 0.83, 0.1, 0.1], {"crack", "pavement"})
+        self.assertNotIn("bird", got)
+        self.assertIn("bear", got)  # COCO's family label stays when no species is agreed
+
+    def test_coco_and_ram_plus_agreeing_give_one_tag(self):
+        got = self.tags(["dog"], [0.1, 0.9, 0.1, 0.1, 0.1], {"dog"})
+        self.assertEqual([t for t in got if t in ram_tagger.SPECIES], ["dog"])
+
+    def test_without_whole_frames_the_crop_must_be_big_enough(self):
+        self.assertNotIn("cat", self.tags([], [0.8, 0, 0, 0, 0], None))
+        self.assertIn("cat", self.tags([], [0.8, 0, 0, 0, 0], None,
+                                       img=np.full((200, 300, 3), 100, np.uint8)))
+        os.environ["DIYKEY_SPECIES_MIN_PX"] = "100"
+        self.assertIn("cat", self.tags([], [0.8, 0, 0, 0, 0], None))
+
+    def test_species_only_on_animal_crops(self):
+        plus = make_plus(self.tmp.name, [0.8, 0, 0, 0, 0.9], set(self.NAMES), names=self.NAMES,
+                         thresholds=[0.5] * 5)
+        tags = ram_tagger.tag_crop(CocoTagger([], plus), self.small,
+                                   {"objectType": "person", "confidence": 80}, {"cat"})
+        self.assertNotIn("cat", [t["tag"] for t in tags])
+
+    def test_build_result_passes_whole_frame_tags(self):
+        path = os.path.join(self.tmp.name, "frame.jpg")
+        cv2.imwrite(path, np.full((360, 640, 3), 100, np.uint8))
+        plus = make_plus(self.tmp.name, [0.8, 0.1, 0.1, 0.1, 0.1], set(self.NAMES),
+                         names=self.NAMES, thresholds=[0.5] * 5)
+
+        class FrameAndCrop(CocoTagger):
+            def tag_frame(self, img, plus=True):
+                out = [{"tag": "bear", "confScore": 0.62}]
+                if plus:
+                    out += [{"tag": t, "confScore": s} for t, s in self.plus.tags(img).items()]
+                return out
+
+        res = ram_tagger.build_result(FrameAndCrop([], plus), "cam", "ev", {1000: path},
+                                      objects=[{"trackerID": 74537, "keyMomentMs": 1000,
+                                                "img": self.small, "hint": self.hint}])
+        self.assertIn("cat", [t["tag"] for t in res["keyMomentsTags"][0]["tags"]])
+        thumb, = res["thumbnailTags"]
+        names = [t["tag"] for t in thumb["tags"]]
+        self.assertIn("cat", names)
+        self.assertNotIn("bear", names)
 
 
 if __name__ == "__main__":
