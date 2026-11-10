@@ -1,6 +1,6 @@
 # DIY-Key backlog
 
-Open items for the macOS / Protect 7.3.70 work. Newest first within each section.
+Open items for the macOS / Protect 7.3.70 work. Newest first within each section. Longer-term work is in [docs/future-backlog.md](docs/future-backlog.md).
 
 ## Next session
 
@@ -13,6 +13,15 @@ Open items for the macOS / Protect 7.3.70 work. Newest first within each section
   first. Also drop the module-level state and in-function `cv2` imports where it falls out.
 
 ## Investigate
+
+- Second-stage verification vs firmware (ui-infer-gateway second_verifier.py, 2.2.8):
+  - No frame: live 2026-11-08 13:48, extraction failed ("no frame ... @4.750s", start == end,
+    seek past the clip). Keeping the claimed type is right, as the firmware does; use its status
+    "skipped", and fix the seek by fetching a short window around the thumbnail time.
+  - No match: we return isValidDetection false at confidence 0.05 when the detector sees nothing.
+    The firmware's verifier has no "nothing there" class: it keeps the detection unless top class
+    prob >= 0.995 says another type.
+  - Confidence: firmware reports min(det% + max(2, prob%/20), 99); we report our own.
 
 - **"Failed to get device details from Network application … 404"** (Protect `service.log`).
   Protect asks the UniFi Network application about every adopted device's MAC and logs a 404 for
