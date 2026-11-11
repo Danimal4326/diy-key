@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Person re-identification vectors (OSNet-AIN x1.0, MSMT17) on Apple's GPU.
+"""Person re-identification vectors (OSNet-AIN x1.0, MSMT17).
 
 The AI Key computes reidEmbed with SmartReID_encoder.engine, a TensorRT build Protect's own
 settings text calls OSNet ("Per-camera OSNet reid cutoff", M/507273:106); it only runs on
@@ -15,6 +15,16 @@ Protect compares these two ways, so the vectors must be raw, not unit length:
   * dedup sessions (M/374992 matchSession) use cosine against reidCutoffDefault 0.75.
 Protect's column is 1024-d (M/315148:83); OSNet gives 512, so the rest is zero-padded, which
 leaves both L2 distance and cosine unchanged.
+
+Two backends, by DIYKEY_REID_MODEL's file type:
+  * .pth   the checkpoint itself, in torch (Apple GPU through MPS, else CPU)
+  * .onnx  scripts/export_reid_onnx.py's export of it, in onnxruntime: no torch, and on the
+           Intel GPU with DIYKEY_ORT_DEVICE (ort_device.py).
+Live 2026-11-11 on an i5-1240P (Iris Xe, host under load), 32 real person crops: torch CPU
+~200 ms, onnxruntime CPU ~92 ms, OpenVINO GPU ~20 ms a crop (first load ~8 s to compile, then
+cached). The ONNX vectors equal torch's on CPU (L2 < 0.001); the GPU runs FP16: cosine >= 0.9997,
+L2 <= 0.8, against vector norms of 30-46, pairwise distances of 9-29 (median) and Protect's
+tap-to-find cut of 20-30.
 """
 import logging
 import os
@@ -22,6 +32,8 @@ import threading
 
 import cv2
 import numpy as np
+
+import ort_device
 
 log = logging.getLogger("diykey.reid")
 
@@ -32,7 +44,7 @@ _MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
 _STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
 
 _lock = threading.Lock()
-_loaded = None  # (model, device, torch) once loaded; False after a failed load
+_loaded = None  # run(x) -> (1, 512) array once loaded; False after a failed load
 
 
 def enabled():
@@ -159,21 +171,53 @@ def _build():
     return OSNetAIN()
 
 
+def state_dict(torch, path):
+    """The checkpoint's weights for _build(), without the training-only classifier."""
+    ckpt = torch.load(path, map_location="cpu", weights_only=True)
+    return {k.removeprefix("module."): v for k, v in ckpt.get("state_dict", ckpt).items()
+            if not k.removeprefix("module.").startswith("classifier")}
+
+
+def preprocess(img_bgr):
+    """(1, 3, 256, 128) float32: resized, RGB, ImageNet-normalised, as the weights expect."""
+    rgb = cv2.cvtColor(cv2.resize(img_bgr, _SIZE, interpolation=cv2.INTER_LINEAR), cv2.COLOR_BGR2RGB)
+    x = (rgb.astype(np.float32) / 255.0 - _MEAN) / _STD
+    return np.ascontiguousarray(x.transpose(2, 0, 1)[None])
+
+
+def _torch_runner(path):
+    import torch
+    model = _build()
+    model.load_state_dict(state_dict(torch, path), strict=True)
+    device = "mps" if torch.backends.mps.is_available() else "cpu"
+    model = model.eval().to(device)
+
+    def run(x):
+        with torch.no_grad():
+            return model(torch.from_numpy(x).to(device)).float().cpu().numpy()
+    return run, f"torch {device}"
+
+
+def _onnx_runner(path):
+    import onnxruntime as ort
+    sess = ort_device.session(ort, path, ["CPUExecutionProvider"], "re-ID")
+    name = sess.get_inputs()[0].name
+
+    def run(x):
+        return sess.run(None, {name: x})[0]
+    return run, ort_device.describe(sess)
+
+
 def _load():
     global _loaded
     if _loaded is not None:
         return _loaded
     path = os.path.expanduser(os.environ.get("DIYKEY_REID_MODEL", "").strip())
     try:
-        import torch
-        ckpt = torch.load(path, map_location="cpu", weights_only=True)
-        state = {k.removeprefix("module."): v for k, v in ckpt.get("state_dict", ckpt).items()
-                 if not k.removeprefix("module.").startswith("classifier")}
-        model = _build()
-        model.load_state_dict(state, strict=True)
-        device = "mps" if torch.backends.mps.is_available() else "cpu"
-        _loaded = (model.eval().to(device), device, torch)
-        log.info("re-ID: %s on %s", os.path.basename(path)[:32], device)
+        runner = _onnx_runner if path.lower().endswith(".onnx") else _torch_runner
+        run, where = runner(path)
+        _loaded = run
+        log.info("re-ID: %s on %s", os.path.basename(path)[:32], where)
     except Exception as e:  # noqa: BLE001 - detection carries on without re-ID vectors
         log.warning("re-ID model %s failed to load: %r", path, e)
         _loaded = False
@@ -187,12 +231,9 @@ def embed(img_bgr):
     loaded = _load()
     if not loaded:
         return None
-    model, device, torch = loaded
-    rgb = cv2.cvtColor(cv2.resize(img_bgr, _SIZE, interpolation=cv2.INTER_LINEAR), cv2.COLOR_BGR2RGB)
-    x = (rgb.astype(np.float32) / 255.0 - _MEAN) / _STD
-    tensor = torch.from_numpy(x.transpose(2, 0, 1)).unsqueeze(0).to(device)
-    with _lock, torch.no_grad():
-        v = model(tensor).float().cpu().numpy().reshape(-1)
+    x = preprocess(img_bgr)
+    with _lock:
+        v = np.asarray(loaded(x), np.float32).reshape(-1)
     if not np.isfinite(v).all():
         return None
     return [float(f) for f in v] + [0.0] * (REID_DIM - v.size)

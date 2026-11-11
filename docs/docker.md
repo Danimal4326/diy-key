@@ -12,7 +12,8 @@ docker build -f docker/Dockerfile -t diykey .                      # ~1.2 GB
 docker build -f docker/Dockerfile --build-arg TORCH=1 -t diykey .  # + CPU torch/open_clip
 ```
 
-`TORCH=1` is only needed for Find Anything (`DIYKEY_CLIP`, `DIYKEY_NL_SEARCH`) and OSNet re-ID.
+`TORCH=1` is only needed for Find Anything (`DIYKEY_CLIP`, `DIYKEY_NL_SEARCH`) and OSNet re-ID,
+and neither needs it once exported to ONNX (below).
 It installs torch from PyTorch's CPU index; `requirements.txt`'s plain `torch` would pull the
 multi-GB CUDA build.
 
@@ -45,6 +46,22 @@ then run the `ORT=openvino` image with `DIYKEY_CLIP=1`, `DIYKEY_NL_SEARCH=1`,
 `DIYKEY_CLIP_ONNX=/data/models/clip` and `DIYKEY_ORT_DEVICE=GPU`. Measured on an Iris Xe against
 the torch backend on real camera crops: an image 131 ms (torch CPU 660 ms), a query 17 ms (65),
 embeddings cosine >= 0.99976 and the same best-matching query for every crop.
+
+### Person re-ID without torch
+
+The same for OSNet (`DIYKEY_REID_MODEL`: tap-to-find, `reidEmbed`, Protect's
+`generate-embeddings` / `segment-video` tasks). Download the OSNet-AIN x1.0 MSMT17 checkpoint
+from Hugging Face `kaiyangzhou/osnet` (MIT) and export it once, on a machine with torch:
+
+```bash
+python3 scripts/export_reid_onnx.py osnet_ain_x1_0_msmt17_256x128_amsgrad_ep50_lr0.0015_coslr_b64_fb10_softmax_labsmth_flip_jitter.pth \
+    /srv/diykey/models/osnet-ain-x1-0-msmt17.onnx   # ~9 MB; checks itself against torch
+```
+
+then set `DIYKEY_REID_MODEL=/data/models/osnet-ain-x1-0-msmt17.onnx`: an `.onnx` file runs in
+onnxruntime (on the iGPU with `DIYKEY_ORT_DEVICE=GPU`), a `.pth` in torch. Measured on an Iris
+Xe on 32 real person crops: ~20 ms a crop (onnxruntime CPU ~92 ms, torch CPU ~200 ms, host under
+load), vectors within L2 0.8 of torch's (norms 30-46; Protect's tap-to-find cut is 20-30).
 
 ## Running it
 
