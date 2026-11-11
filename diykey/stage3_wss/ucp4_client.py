@@ -107,7 +107,7 @@ def _feature_flags(env=None):
     ram = bool((env.get("DIYKEY_RAM_MODEL") or "").strip())
     # Only the backends vlm_describe implements; any other value would advertise a summary
     # that never arrives.
-    vlm = (env.get("DIYKEY_VLM") or "").strip().lower() in ("mlx", "transformers")
+    vlm = (env.get("DIYKEY_VLM") or "").strip().lower() in vlm_describe.BACKENDS_ON
     return {
         # Unchanged from the always-on list this replaced.
         "supportPoseEstimation": _feature(True),

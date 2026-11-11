@@ -63,6 +63,27 @@ onnxruntime (on the iGPU with `DIYKEY_ORT_DEVICE=GPU`), a `.pth` in torch. Measu
 Xe on 32 real person crops: ~20 ms a crop (onnxruntime CPU ~92 ms, torch CPU ~200 ms, host under
 load), vectors within L2 0.8 of torch's (norms 30-46; Protect's tap-to-find cut is 20-30).
 
+### AI Summary on the iGPU
+
+The `ORT=openvino` image also has OpenVINO GenAI, so the NeXT AI Summary can run there with
+`DIYKEY_VLM=openvino` and `DIYKEY_VLM_MODEL` pointing at a folder with an OpenVINO export of a
+vision-language model (`DIYKEY_VLM_DEVICE`, default the `DIYKEY_ORT_DEVICE` device). No conversion
+is needed for the ready-made ones on Hugging Face's `OpenVINO` organisation:
+
+```bash
+hf download OpenVINO/Qwen3-VL-4B-Instruct-int4-ov --local-dir /srv/diykey/models/Qwen3-VL-4B-Instruct-int4-ov
+```
+
+Measured on an Iris Xe on 8 real indoor frames, same prompt and clean-up as the firmware:
+
+| Model (int4) | Size | Per summary | Host RAM | First compile | Notes |
+|---|---|---|---|---|---|
+| `OpenVINO/Qwen3-VL-4B-Instruct-int4-ov` (Apache-2.0) | 2.9 GB | ~4.5 s | ~3 GB | ~24 s | short, follows the prompt's rules, few invented details |
+| `OpenVINO/InternVL2-1B-int4-ov` (MIT; the firmware's model family) | 0.8 GB | ~3.2 s | ~1.6 GB | ~13 s | long, describes the background, invents objects ("a baby is sleeping") |
+
+The compiled model is cached in `/data/cache` (several GB for the 4B), so later starts are
+quicker. Summaries have their own queue (`DIYKEY_VLM_QUEUE`), so tags aren't held up.
+
 ## Running it
 
 Give it its own LAN address, as the systemd instances get a macvlan child: the console must

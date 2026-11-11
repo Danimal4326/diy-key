@@ -180,6 +180,7 @@ class TestHandleAction(_StateDirTest):
             self.assertFalse(flags[name]["enabled"], name)
         self.assertFalse(self._flags(DIYKEY_VLM="0")["supportAiSummary"]["enabled"])
         self.assertFalse(self._flags(DIYKEY_VLM="qwen2-vl")["supportAiSummary"]["enabled"])
+        self.assertTrue(self._flags(DIYKEY_VLM="openvino")["supportAiSummary"]["enabled"])
 
     def test_model_mode_reported_in_get_info(self):
         self.addCleanup(setattr, ucp4_client, "_ai_mode", "basic")

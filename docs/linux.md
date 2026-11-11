@@ -93,7 +93,8 @@ DIYKEY_RAM_MODEL=/root/models/yolov9-s-320.onnx
 # DIYKEY_LPR=1           # licence plate recognition
 # DIYKEY_FACE_ENHANCE=1  # face enhancement
 # DIYKEY_FACE_ENHANCE_MODEL=/path/to/gfpgan_1.4.onnx
-# DIYKEY_VLM=transformers  # AI summary on Linux (mlx is macOS only); needs pip install transformers
+# DIYKEY_VLM=transformers  # AI summary on Linux (mlx is macOS only): transformers, or openvino
+#                          # (Intel GPU/CPU; needs openvino-genai, see docs/docker.md)
 # DIYKEY_VLM_MODEL=/path/to/InternVL2.5-1B   # local checkpoint for transformers
 # DIYKEY_TASK_WORKERS=1
 # DIYKEY_TASK_QUEUE_MAX=200

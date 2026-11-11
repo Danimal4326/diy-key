@@ -112,6 +112,79 @@ class DescribeTest(unittest.TestCase):
         self.assertEqual(results, ["A cat."] * 4)
 
 
+class FakeGenAI:
+    """openvino_genai stand-in: records the pipeline's device/options and each generate()."""
+
+    class GenerationConfig:
+        pass
+
+    class VLMPipeline:
+        made = []
+
+        def __init__(self, path, device, **props):
+            FakeGenAI.VLMPipeline.made.append((path, device, props))
+            self.calls = []
+
+        def generate(self, prompt, images, generation_config):
+            self.calls.append((prompt, [i.shape for i in images], generation_config))
+            return mock.Mock(texts=["The image shows a person walking a dog"])
+
+
+class FakeOv:
+    class Tensor:
+        def __init__(self, array):
+            self.shape = array.shape
+
+
+class OpenVinoBackendTest(unittest.TestCase):
+    def setUp(self):
+        FakeGenAI.VLMPipeline.made.clear()
+        vd._loaded.clear()
+        self.addCleanup(vd._loaded.clear)
+        patcher = mock.patch.dict(sys.modules, {"openvino_genai": FakeGenAI, "openvino": FakeOv})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _env(self, **extra):
+        env = {"DIYKEY_VLM": "openvino", "DIYKEY_VLM_MODEL": "/m/qwen3-vl",
+               "DIYKEY_ORT_CACHE_DIR": "/tmp/diykey-test-ov-cache"}
+        env.update(extra)
+        return mock.patch.dict(os.environ, env)
+
+    def test_runs_the_pipeline_on_the_ort_device_with_firmware_settings(self):
+        with self._env(DIYKEY_ORT_DEVICE="GPU"), self.assertLogs("diykey.vlm", "INFO") as logs:
+            text = vd.describe(_frame(1920, 1080))
+        self.assertEqual(text, "A person walking a dog.")
+        path, device, props = FakeGenAI.VLMPipeline.made[0]
+        self.assertEqual((path, device, props["CACHE_DIR"]),
+                         ("/m/qwen3-vl", "GPU", "/tmp/diykey-test-ov-cache"))
+        self.assertIn("on OpenVINO GPU", logs.output[0])
+
+    def test_one_448_tile_and_greedy_config(self):
+        with self._env(DIYKEY_ORT_DEVICE="GPU"):
+            vd.describe(_frame(1920, 1080))
+        # _loaded is keyed (backend, model, model mtime).
+        pipe = next(fn for key, fn in vd._loaded.items()
+                    if key[:2] == ("openvino", "/m/qwen3-vl")).pipe
+        prompt, shapes, config = pipe.calls[0]
+        self.assertEqual(shapes, [(1, 227, 448, 3)])   # 1920x972 after the top crop, NHWC; PIL rounds
+        self.assertTrue(prompt.startswith(vd.SYSTEM + "\n"))
+        self.assertIn("30 words", prompt)
+        self.assertEqual((config.max_new_tokens, config.do_sample, config.repetition_penalty),
+                         (vd.MAX_NEW_TOKENS, False, vd.REPETITION_PENALTY))
+
+    def test_device_choice(self):
+        for env, want in (({}, "CPU"), ({"DIYKEY_ORT_DEVICE": "gpu"}, "GPU"),
+                          ({"DIYKEY_ORT_DEVICE": "GPU", "DIYKEY_VLM_DEVICE": "cpu"}, "CPU"),
+                          ({"DIYKEY_VLM_DEVICE": "GPU.1"}, "GPU.1")):
+            with mock.patch.dict(os.environ, env, clear=True):
+                self.assertEqual(vd.device(), want, env)
+
+    def test_enabled_for_openvino(self):
+        with self._env():
+            self.assertTrue(vd.enabled())
+
+
 class ContextTest(unittest.TestCase):
     def test_context_is_appended_for_that_call_only(self):
         prompts = []
