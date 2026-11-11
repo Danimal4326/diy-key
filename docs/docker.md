@@ -16,6 +16,22 @@ docker build -f docker/Dockerfile --build-arg TORCH=1 -t diykey .  # + CPU torch
 It installs torch from PyTorch's CPU index; `requirements.txt`'s plain `torch` would pull the
 multi-GB CUDA build.
 
+### Intel GPU (`ORT=openvino`)
+
+```bash
+docker build -f docker/Dockerfile --build-arg ORT=openvino -t diykey .  # amd64, ~1.9 GB
+```
+
+swaps `onnxruntime` for `onnxruntime-openvino` and adds Intel's GPU compute runtime (Debian
+trixie has no `intel-opencl-icd`, so Intel's release debs, sha256-pinned). Run it with
+`--device /dev/dri` and `DIYKEY_ORT_DEVICE=GPU`: the COCO detector, RAM++ and face enhancement
+then run on the iGPU (`stage3_wss/ort_device.py`; fast-alpr stays on CPU). The startup line
+says where: `RAM tagger: ... (320px, 80 classes, OpenVINO GPU)`. Measured on an i5-1240P (Iris
+Xe), per real frame: YOLOv9-s 320 px 22.6 -> 13.2 ms, YOLO11m 640 px 202.9 -> 63.5 ms, YOLOv9-c
+640 px 350.2 -> 83.4 ms. The compiled model and Intel's kernel cache go to `/data/cache`, so a
+rebuilt container skips most of the ~3 s first compile. Without `/dev/dri`, or with the plain
+image, the setting falls back to CPU with a warning.
+
 ## Running it
 
 Give it its own LAN address, as the systemd instances get a macvlan child: the console must

@@ -25,9 +25,12 @@ jobs:
 
   docker:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        ort: [cpu, openvino]   # openvino: Intel GPU build; runners have no GPU, so it runs on CPU
     steps:
       - uses: actions/checkout@v4
-      - name: Build image
-        run: docker build -f docker/Dockerfile -t diykey:ci .
+      - name: Build image (ORT=${{ matrix.ort }})
+        run: docker build -f docker/Dockerfile --build-arg ORT=${{ matrix.ort }} -t diykey:ci .
       - name: Smoke test
         run: docker/smoke-test.sh diykey:ci
