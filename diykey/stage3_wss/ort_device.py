@@ -9,7 +9,8 @@
 OpenVINO needs the onnxruntime-openvino wheel in place of onnxruntime (docker/Dockerfile
 ORT=openvino), and for an Intel GPU the OpenCL compute runtime plus /dev/dri. Without the
 provider the setting is ignored with one warning; a device that can't compile a model leaves
-that stage on its own providers, logged.
+that stage on its own providers, logged. Used by the COCO detector, RAM++, face enhancement and
+CLIP's ONNX backend (clip_embed.py, DIYKEY_CLIP_ONNX).
 
 Live 2026-11-10 on an i5-1240P (Iris Xe), the COCO detector per real key-moment frame:
 YOLOv9-s 320 px 22.6 -> 13.2 ms, YOLO11m 640 px 202.9 -> 63.5 ms, YOLOv9-c 640 px 350.2 ->
