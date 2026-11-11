@@ -83,7 +83,8 @@ class DescribeTest(unittest.TestCase):
         self.assertEqual(vd.describe(_frame(100, 100), backend=fake),
                          "A person at the door.")
         self.assertEqual(seen["shape"], (90, 100, 3))
-        self.assertIn("30 words", seen["prompt"])
+        self.assertIn("20 words", seen["prompt"])
+        self.assertIn("Do not guess mood", seen["prompt"])
 
     def test_exception_returns_none(self):
         def boom(rgb, prompt):
@@ -169,7 +170,7 @@ class OpenVinoBackendTest(unittest.TestCase):
         prompt, shapes, config = pipe.calls[0]
         self.assertEqual(shapes, [(1, 227, 448, 3)])   # 1920x972 after the top crop, NHWC; PIL rounds
         self.assertTrue(prompt.startswith(vd.SYSTEM + "\n"))
-        self.assertIn("30 words", prompt)
+        self.assertIn("20 words", prompt)
         self.assertEqual((config.max_new_tokens, config.do_sample, config.repetition_penalty),
                          (vd.MAX_NEW_TOKENS, False, vd.REPETITION_PENALTY))
 

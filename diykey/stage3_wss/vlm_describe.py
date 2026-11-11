@@ -60,11 +60,19 @@ REPETITION_PENALTY = 1.1
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
 
-# Paraphrase of the firmware prompt's intent, same rules in the same order.
+# The firmware prompt's rules, paraphrased, plus two learnt live (2026-11-11, Qwen3-VL-4B on
+# real frames): without them the model adds guesses ("suggesting relaxed downtime") and remarks
+# on the image itself ("captured in monochrome", "dim lighting"). 20 words, not the firmware's 30:
+# the good replies were that short anyway. A rule asking it to say when nothing is there made it
+# call a frame with a small cat in it empty, so there is none.
 SYSTEM = "You describe images briefly and follow the instructions exactly."
 PROMPT = (
-    "Summarise this image in no more than 30 words. Rules:\n"
+    "Summarise this image in one sentence of no more than 20 words. Rules:\n"
     "- Describe only the main subject or any unusual action.\n"
+    "- State only what is visible. Do not guess mood, intent or meaning; avoid words like "
+    "\"suggesting\", \"appearing\" or \"seems\".\n"
+    "- Do not mention lighting, colours, image quality, or that the image is black and white "
+    "or taken at night.\n"
     "- Ignore visible text such as licence plates and brand names.\n"
     "- Do not describe the background or the timestamp.\n"
     "- Do not guess the camera angle, the location or the setting."
