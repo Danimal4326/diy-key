@@ -24,6 +24,7 @@ import cv2
 import numpy as np
 
 import clip_embed
+import ort_device
 import reid_model
 
 log = logging.getLogger("diykey.ram")
@@ -239,9 +240,9 @@ class RamPlus:
             provs.insert(0, ("CoreMLExecutionProvider", {
                 "ModelFormat": "MLProgram", "MLComputeUnits": "ALL",
                 "ModelCacheDirectory": os.path.join(d, ".coreml_cache")}))
-        self._session = ort.InferenceSession(self.model_path, providers=provs)
+        self._session = ort_device.session(ort, self.model_path, provs, "RAM++")
         log.info("RAM++: %s (%s, %d of %d tags in Protect's vocabulary)", self.model_path,
-                 self._session.get_providers()[0], int(self.keep.sum()), len(names))
+                 ort_device.describe(self._session), int(self.keep.sum()), len(names))
 
     def _prep(self, img_bgr):
         h, w = img_bgr.shape[:2]
@@ -350,14 +351,15 @@ class RamTagger:
         import onnxruntime as ort
         plus_path = plus_path if plus_path is not None else os.environ.get("DIYKEY_RAM_PLUS_MODEL")
         self.plus = RamPlus(plus_path) if plus_path else None
-        self.session = ort.InferenceSession(model_path, providers=["CPUExecutionProvider"])
+        self.session = ort_device.session(ort, model_path, ["CPUExecutionProvider"], "RAM tagger")
         inp = self.session.get_inputs()[0]
         self.input_name = inp.name
         self.size = int(inp.shape[2])
         names = self.session.get_modelmeta().custom_metadata_map.get("names")
         self.labels = ast.literal_eval(names) if names else {}
         self.conf, self.iou = conf, iou
-        log.info("RAM tagger: %s (%dpx, %d classes)", model_path, self.size, len(self.labels))
+        log.info("RAM tagger: %s (%dpx, %d classes, %s)", model_path, self.size, len(self.labels),
+                 ort_device.describe(self.session))
 
     def _letterbox(self, img):
         h, w = img.shape[:2]
