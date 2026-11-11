@@ -1,0 +1,177 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Fork-only: publish the DIY-Key image (docker/Dockerfile) to GitHub Container Registry.
+#
+# Rolling builds: after the CI workflow passes on a push to main (so a red commit is never
+# published), or by hand from the Actions tab. Pushes ghcr.io/<owner>/diykey:main and
+# :main-<short sha>; :latest is left alone.
+#
+# Releases: push a tag vMAJOR.MINOR.PATCH on a commit that already passed CI (i.e. one pushed
+# to main first):
+#
+#   git tag -a v0.2.0 -m "v0.2.0" && git push <remote> v0.2.0
+#
+# That pushes :0.2.0, :0.2 and :latest, then creates the GitHub Release. A pre-release tag
+# (v0.2.0-rc1) pushes only :0.2.0-rc1, marks the Release as a pre-release, and leaves :0.2 and
+# :latest where they were.
+#
+# If the package already exists but wasn't created by this workflow, give this repo write
+# access once: package settings -> Manage Actions access -> add the repo with the Write role.
+# Otherwise the push fails with 403 permission_denied.
+name: Publish image
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: publish-image
+  cancel-in-progress: false
+
+jobs:
+  image:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'push' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      actions: read  # the release gate below reads CI's runs
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      tags: ${{ steps.meta.outputs.tags }}
+      prerelease: ${{ steps.meta.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # workflow_run: the commit CI tested, not whatever main is now.
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+      - name: Image name and tags
+        id: meta
+        env:
+          EVENT: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/diykey"
+          sha="$(git rev-parse HEAD)"
+          version="" prerelease=false
+          if [ "$EVENT" = push ]; then
+            version="${REF_NAME#v}"
+            if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+              echo "::error::tag $REF_NAME is not vMAJOR.MINOR.PATCH[-PRERELEASE]"
+              exit 1
+            fi
+            tags="$image:$version"
+            if [[ "$version" == *-* ]]; then
+              prerelease=true
+            else
+              tags="$tags,$image:${version%.*},$image:latest"
+            fi
+          else
+            tags="$image:main-${sha:0:7},$image:main"
+          fi
+          {
+            echo "image=$image"
+            echo "sha=$sha"
+            echo "short=${sha:0:7}"
+            echo "version=$version"
+            echo "prerelease=$prerelease"
+            echo "tags=$tags"
+          } >> "$GITHUB_OUTPUT"
+          echo "publishing: $tags"
+
+      - name: Release only a commit that passed CI
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ steps.meta.outputs.sha }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          passed="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yml --commit "$SHA" \
+                      --status success --json databaseId --jq length)"
+          if [ "${passed:-0}" -eq 0 ]; then
+            echo "::error::CI has not passed on ${SHA:0:7}; push it to main, wait for CI, then re-push tag $REF_NAME"
+            exit 1
+          fi
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push (TORCH=0, amd64)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          platforms: linux/amd64
+          build-args: |
+            TORCH=0
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ steps.meta.outputs.sha }}
+            org.opencontainers.image.version=${{ steps.meta.outputs.version || steps.meta.outputs.short }}
+            org.opencontainers.image.licenses=AGPL-3.0-or-later
+            org.opencontainers.image.description=DIY-Key UniFi Protect AI Key emulator with its own PostgreSQL + pgvector, amd64. Needs its own LAN address (macvlan); see docs/docker.md.
+          cache-from: type=gha,scope=diykey
+          cache-to: type=gha,scope=diykey,mode=max
+
+      - name: Smoke test the pushed image
+        env:
+          IMAGE_TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          # The first tag is the most specific one: the version, or main-<sha>.
+          docker/smoke-test.sh "${IMAGE_TAGS%%,*}"
+
+  release:
+    needs: image
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Create the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          VERSION: ${{ needs.image.outputs.version }}
+          TAGS: ${{ needs.image.outputs.tags }}
+          PRERELEASE: ${{ needs.image.outputs.prerelease }}
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/diykey"
+          tag_list=""
+          IFS=, read -ra pushed <<< "$TAGS"
+          for t in "${pushed[@]}"; do tag_list+="\`${t##*:}\` "; done
+          {
+            echo "## Container image (DIY-Key + PostgreSQL/pgvector, linux/amd64)"
+            echo
+            echo '```'
+            echo "docker pull $image:$VERSION"
+            echo '```'
+            echo
+            echo "Run it with its own LAN address (macvlan), NET_ADMIN and NET_RAW, and a /data volume;"
+            echo "see [docs/docker.md](https://github.com/$GITHUB_REPOSITORY/blob/$TAG/docs/docker.md)."
+            echo
+            echo "Tags: ${tag_list% }"
+            echo
+            gh api "repos/$GITHUB_REPOSITORY/releases/generate-notes" -f tag_name="$TAG" --jq .body
+          } > notes.md
+          flags=(--latest)
+          [ "$PRERELEASE" = true ] && flags=(--prerelease --latest=false)
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag \
+            --title "$TAG" --notes-file notes.md "${flags[@]}"
