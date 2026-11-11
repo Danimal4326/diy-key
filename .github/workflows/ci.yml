@@ -9,8 +9,8 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.13"
       - name: Install dependencies (torch from PyTorch's CPU index)
@@ -29,7 +29,7 @@ jobs:
       matrix:
         ort: [cpu, openvino]   # openvino: Intel GPU build; runners have no GPU, so it runs on CPU
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Build image (ORT=${{ matrix.ort }})
         run: docker build -f docker/Dockerfile --build-arg ORT=${{ matrix.ort }} -t diykey:ci .
       - name: Smoke test
