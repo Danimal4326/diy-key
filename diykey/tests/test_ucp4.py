@@ -549,6 +549,36 @@ class TestPostRecognizeResult(unittest.TestCase):
             ucp4_client._post_recognize_result("h", "m", None, "c", "e", {"description": "d"})
         post.assert_not_called()
 
+    def _post_raising(self, *effects):
+        post = mock.Mock(side_effect=list(effects))
+        with mock.patch.object(ucp4_client.requests, "post", post), \
+                mock.patch.object(ucp4_client.time, "sleep") as sleep, \
+                self.assertLogs("ucp4-client", "INFO") as logs:
+            ucp4_client._post_recognize_result("h", "m", "/r", "c", "e", {"description": "d"})
+        return post, sleep, logs
+
+    def test_long_read_timeout(self):
+        post = self._post(result={"eventId": "ev1", "description": "d"})
+        self.assertEqual(post.call_args.kwargs["timeout"], (10, 45))
+
+    def test_connection_failure_retried_once(self):
+        ok = mock.Mock(status_code=200, text="{}")
+        post, sleep, _ = self._post_raising(ucp4_client.requests.ConnectionError("refused"), ok)
+        self.assertEqual(post.call_count, 2)
+        sleep.assert_called_once_with(ucp4_client.RESULT_POST_RETRY_S)
+
+    def test_connection_failure_gives_up_after_the_retry(self):
+        err = ucp4_client.requests.ConnectTimeout("slow connect")
+        post, _, logs = self._post_raising(err, err)
+        self.assertEqual(post.call_count, 2)
+        self.assertIn("failed", logs.output[-1])
+
+    def test_read_timeout_not_resent(self):
+        # Protect may have saved it and only been slow to answer: a second POST could save twice.
+        post, sleep, _ = self._post_raising(ucp4_client.requests.ReadTimeout("slow save"))
+        self.assertEqual(post.call_count, 1)
+        sleep.assert_not_called()
+
 
 class TestVersionFromUpdateUri(unittest.TestCase):
     def test_version_from_path(self):

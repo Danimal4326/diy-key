@@ -329,6 +329,12 @@ def _nl_search_reply(head, body, device_info):
     return {}
 
 
+# websockets' default 20 s ping timeout closed this socket twice in 4 minutes (live 2026-11-11,
+# 03:06/03:10) while the console (a swapping UDM-Pro under retroactive processing) was slow to
+# answer; each drop cost 6-16 s of Find Anything. 60 s rides those stalls out.
+NL_PING_TIMEOUT_S = 60
+
+
 def _nl_search_loop(fallback_host_port, device_info):
     """Hold the AI Key's second WebSocket (wss://<console>:7443/wss/nl-search/v1) open while
     adopted, so Protect routes Find Anything here (see nl_search.py)."""
@@ -345,7 +351,8 @@ def _nl_search_loop(fallback_host_port, device_info):
         try:
             with connect(url, subprotocols=["ucp4"],
                          additional_headers={"x-ident": device_info["mac_nosep"]},
-                         ssl=build_ssl_context(), open_timeout=15, **extra) as ws:
+                         ssl=build_ssl_context(), open_timeout=15,
+                         ping_timeout=NL_PING_TIMEOUT_S, **extra) as ws:
                 log.info("nl-search connected to %s", url)
                 global _nl_ws
                 _nl_ws = ws
@@ -2122,6 +2129,12 @@ def _recognize_images(console_host, mac_nosep, body):
     return result
 
 
+# (connect, read) seconds. Read was 15: live 2026-11-11 two results of ~1,300 timed out while a
+# swapping UDM-Pro took longer than that to save them (its own log showed DB pool timeouts).
+RESULT_POST_TIMEOUT = (10, 45)
+RESULT_POST_RETRY_S = 3
+
+
 def _post_recognize_result(console_host, mac_nosep, res_url, camera_id, event_id, result=None,
                            parts=None, images=None):
     """POST our recognize-anything result to resUrl.
@@ -2164,13 +2177,25 @@ def _post_recognize_result(console_host, mac_nosep, res_url, camera_id, event_id
     for tracker_id, jpeg in (images or {}).items():
         if jpeg:
             files[str(tracker_id)] = (f"{tracker_id}.jpg", jpeg, "image/jpeg")
-    try:
-        resp = requests.post(url, headers=_callback_headers(mac_nosep), files=files,
-                             cert=(CERT_PATH, KEY_PATH), verify=False, timeout=15)
-        log.info("POST %s [%s] -> %s: %s", url, ", ".join(files), resp.status_code,
-                 resp.text[:2000])
-    except requests.RequestException as e:
-        log.warning("POST %s failed: %r", url, e)
+    for attempt in (1, 2):
+        try:
+            resp = requests.post(url, headers=_callback_headers(mac_nosep), files=files,
+                                 cert=(CERT_PATH, KEY_PATH), verify=False,
+                                 timeout=RESULT_POST_TIMEOUT)
+            log.info("POST %s [%s] -> %s: %s", url, ", ".join(files), resp.status_code,
+                     resp.text[:2000])
+            return
+        except requests.ConnectionError as e:  # includes ConnectTimeout, not ReadTimeout
+            # Never reached Protect: safe to send again. A ReadTimeout is not retried (it
+            # lands in RequestException below): Protect may have saved it, only slowly.
+            if attempt == 2:
+                log.warning("POST %s failed: %r", url, e)
+                return
+            log.warning("POST %s failed (%r); retrying once", url, e)
+            time.sleep(RESULT_POST_RETRY_S)
+        except requests.RequestException as e:
+            log.warning("POST %s failed: %r", url, e)
+            return
 
 
 def _watch_for_reconnect(ws, this_connection_token, stop_event, poll_interval=2.0):
