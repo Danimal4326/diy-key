@@ -15,8 +15,12 @@ fast-alpr
 # rknn-toolkit-lite2 (stage5_faceid NPU inference) is not on PyPI: install the
 # Rockchip wheel matching librknnrt 2.3.2 from rknn-toolkit2's rknn-toolkit-lite2
 # packages/ directory.
-# Find Anything embeddings (stage3_wss/clip_embed.py), only with DIYKEY_CLIP=1.
+# Find Anything embeddings (stage3_wss/clip_embed.py), only with DIYKEY_CLIP=1: the torch
+# backend needs torch + open_clip_torch; the ONNX one (DIYKEY_CLIP_ONNX, exported with
+# scripts/export_clip_onnx.py) only Pillow + tokenizers, with onnxruntime above.
 torch>=2.4
 open_clip_torch>=2.24
+Pillow>=10
+tokenizers>=0.20
 # NeXT AI Summary (stage3_wss/vlm_describe.py), only with DIYKEY_VLM=mlx (Apple Silicon); tested with:
 # mlx-vlm==0.7.12

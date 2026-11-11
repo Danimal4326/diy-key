@@ -8,8 +8,21 @@ share one space: open_clip's ViT-L-14 with OpenAI's weights (the quickgelu varia
 those weights were trained with), the public model
 Protect names. Like the AI Key's text encoder, short queries get "a photo of ".
 
-Off unless DIYKEY_CLIP=1 (torch + open_clip_torch installed; ~1.7 GB of weights
-on first use). Loaded once, used from several threads under a lock.
+Off unless DIYKEY_CLIP=1. Loaded once, used from several threads under a lock. Two backends,
+same vectors:
+
+  torch (default)  open_clip_torch + torch; ~1.7 GB of weights downloaded on first use. Runs on
+                   Apple's GPU (MPS) or the CPU.
+  ONNX             DIYKEY_CLIP_ONNX=<dir> holding clip-vit-l14-visual.onnx,
+                   clip-vit-l14-text.onnx and tokenizer.json (scripts/export_clip_onnx.py makes
+                   them from the same open_clip model). onnxruntime + Pillow + tokenizers, no
+                   torch; runs where ort_device.py says (DIYKEY_ORT_DEVICE=GPU: an Intel iGPU).
+
+Checked 2026-11-10 against the torch backend on real camera frames and crops: preprocessing
+identical (max difference 0 over 29 images), tokens identical (14 704 texts: every Protect tag
+plain and as "a photo of ...", queries, descriptions), embeddings cosine 1.00000 on CPU and
+>= 0.99962 on an Iris Xe (FP16). Per image torch CPU 640-690 ms, onnxruntime CPU 369 ms,
+OpenVINO iGPU 161 ms; per text 61 / 44 / 18 ms.
 """
 import logging
 import os
@@ -22,6 +35,14 @@ log = logging.getLogger("diykey.clip")
 
 MODEL_NAME = "clip-ViT-L-14"
 DIM = 768
+ONNX_ENV = "DIYKEY_CLIP_ONNX"
+VISUAL_ONNX, TEXT_ONNX, TOKENIZER_JSON = (
+    "clip-vit-l14-visual.onnx", "clip-vit-l14-text.onnx", "tokenizer.json")
+# open_clip's ViT-L-14-quickgelu / openai preprocessing and tokenizer framing.
+SIZE = 224
+MEAN = np.array((0.48145466, 0.4578275, 0.40821073), np.float32)
+STD = np.array((0.26862954, 0.26130258, 0.27577711), np.float32)
+SOT, EOT, CONTEXT = 49406, 49407, 77
 _lock = threading.Lock()
 _model = None
 
@@ -30,22 +51,87 @@ def enabled():
     return os.environ.get("DIYKEY_CLIP", "0") == "1"
 
 
+class _TorchBackend:
+    def __init__(self):
+        import open_clip
+        import torch
+        self.torch = torch
+        self.device = "mps" if torch.backends.mps.is_available() else "cpu"
+        self.model, _, self.preprocess = open_clip.create_model_and_transforms(
+            "ViT-L-14-quickgelu", pretrained="openai", device=self.device)
+        self.model.eval()
+        self.tokenizer = open_clip.get_tokenizer("ViT-L-14-quickgelu")
+        self.where = f"torch {self.device}"
+
+    def image(self, img_bgr):
+        from PIL import Image
+        pil = Image.fromarray(cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB))
+        with self.torch.no_grad():
+            feats = self.model.encode_image(self.preprocess(pil).unsqueeze(0).to(self.device))
+        return feats.float().cpu().numpy()
+
+    def text(self, phrase):
+        with self.torch.no_grad():
+            feats = self.model.encode_text(self.tokenizer([phrase]).to(self.device))
+        return feats.float().cpu().numpy()
+
+
+def preprocess(img_bgr):
+    """[1, 3, 224, 224] float32, exactly open_clip's transform: shortest side to 224 (bicubic,
+    antialiased, as torchvision's Resize on a PIL image), centre crop, CLIP mean/std."""
+    from PIL import Image
+    pil = Image.fromarray(cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB))
+    w, h = pil.size
+    short, long_ = (w, h) if w <= h else (h, w)
+    other = int(SIZE * long_ / short)
+    nw, nh = (SIZE, other) if w <= h else (other, SIZE)
+    pil = pil.resize((nw, nh), Image.BICUBIC)
+    top, left = int(round((nh - SIZE) / 2.0)), int(round((nw - SIZE) / 2.0))
+    pil = pil.crop((left, top, left + SIZE, top + SIZE))
+    x = (np.asarray(pil, np.float32) / 255.0 - MEAN) / STD
+    return x.transpose(2, 0, 1)[None]
+
+
+def tokens(tokenizer, phrase):
+    """[1, 77] int64 as open_clip frames them: start, BPE ids (truncated), end, zero padding."""
+    ids = tokenizer.encode(phrase, add_special_tokens=False).ids[:CONTEXT - 2]
+    row = np.zeros((1, CONTEXT), np.int64)
+    row[0, :len(ids) + 2] = [SOT] + ids + [EOT]
+    return row
+
+
+class _OnnxBackend:
+    def __init__(self, folder):
+        import onnxruntime as ort
+        from tokenizers import Tokenizer
+        import ort_device
+        cpu = ["CPUExecutionProvider"]
+        self.visual = ort_device.session(ort, os.path.join(folder, VISUAL_ONNX), cpu, "CLIP image")
+        self.textual = ort_device.session(ort, os.path.join(folder, TEXT_ONNX), cpu, "CLIP text")
+        self.tokenizer = Tokenizer.from_file(os.path.join(folder, TOKENIZER_JSON))
+        self.v_in = self.visual.get_inputs()[0].name
+        self.t_in = self.textual.get_inputs()[0].name
+        self.where = (f"ONNX, image on {ort_device.describe(self.visual)}, "
+                      f"text on {ort_device.describe(self.textual)}")
+
+    def image(self, img_bgr):
+        return self.visual.run(None, {self.v_in: preprocess(img_bgr)})[0]
+
+    def text(self, phrase):
+        return self.textual.run(None, {self.t_in: tokens(self.tokenizer, phrase)})[0]
+
+
 def _load():
-    """(model, preprocess, tokenizer, device), or None when unavailable."""
+    """The loaded backend, or None when CLIP is unavailable (logged once)."""
     global _model
     with _lock:
         if _model is None:
+            folder = (os.environ.get(ONNX_ENV) or "").strip()
             try:
-                import open_clip
-                import torch
-                device = "mps" if torch.backends.mps.is_available() else "cpu"
-                model, _, preprocess = open_clip.create_model_and_transforms(
-                    "ViT-L-14-quickgelu", pretrained="openai", device=device)
-                model.eval()
-                _model = (model, preprocess, open_clip.get_tokenizer("ViT-L-14-quickgelu"), device)
-                log.info("CLIP ViT-L-14 (openai) loaded on %s", device)
+                _model = _OnnxBackend(os.path.expanduser(folder)) if folder else _TorchBackend()
+                log.info("CLIP ViT-L-14 (openai) loaded: %s", _model.where)
             except Exception as e:  # noqa: BLE001 -- search just stays without embeddings
-                log.warning("CLIP unavailable: %r", e)
+                log.warning("CLIP unavailable%s: %r", f" ({ONNX_ENV}={folder})" if folder else "", e)
                 _model = False
         return _model or None
 
@@ -63,13 +149,9 @@ def image_embed(img_bgr):
     loaded = _load()
     if not loaded:
         return None
-    model, preprocess, _, device = loaded
-    import torch
-    from PIL import Image
-    pil = Image.fromarray(cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB))
-    with _lock, torch.no_grad():
-        feats = model.encode_image(preprocess(pil).unsqueeze(0).to(device))
-    return _unit(feats.float().cpu().numpy())
+    with _lock:
+        feats = loaded.image(img_bgr)
+    return _unit(feats)
 
 
 def text_embed(text):
@@ -79,14 +161,12 @@ def text_embed(text):
     loaded = _load()
     if not loaded:
         return None
-    model, _, tokenizer, device = loaded
-    import torch
     phrase = text.strip()
     if len(phrase.split()) < 3:
         phrase = "a photo of " + phrase
-    with _lock, torch.no_grad():
-        feats = model.encode_text(tokenizer([phrase]).to(device))
-    return _unit(feats.float().cpu().numpy())
+    with _lock:
+        feats = loaded.text(phrase)
+    return _unit(feats)
 
 
 # Zero-shot labelling (ram_tagger.not_animal_prob): each label is the mean of these prompts, as
