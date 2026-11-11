@@ -17,6 +17,7 @@ unknown actions are acked with ``{}`` and logged so the console's own
 ``errors.log`` can teach us new shapes.
 """
 import argparse
+import concurrent.futures
 import json
 import logging
 import os
@@ -757,9 +758,12 @@ def handle_action(head, body, device_info):
         # has entries for them (same gates as _handle_recognize).
         wanted = _wanted_metas(body or {})
         extra = tuple(g for g in ("face", "lpr") if g in wanted)
-        _submit_task("recognizeKeyFrames", _handle_recognize,
-                     (device_info["console_host"], device_info["mac_nosep"], body), ram=True,
-                     **({"extra_groups": extra} if extra else {}))
+        fetch = _start_prefetch(device_info["console_host"], device_info["mac_nosep"], body)
+        if not _submit_task("recognizeKeyFrames", _handle_recognize,
+                            (device_info["console_host"], device_info["mac_nosep"], body,
+                             fetch), ram=True,
+                            **({"extra_groups": extra} if extra else {})) and fetch:
+            fetch.cancel()
     elif action == "fastReverification":
         # Second Stage Verification from per-thumbnail JPEGs (or a clip when Protect falls
         # back), aikey-fw 2.2.8 syswrapper.sh:3324-3640. Same queue as the other model work.
@@ -1014,11 +1018,42 @@ _tagger_lock = threading.Lock()
 _tagger_warned = False
 
 
+def _footprint_mb():
+    """This process's memory in MB as Activity Monitor counts it (macOS phys_footprint, which
+    includes compressed and swapped pages), or None. Live 2026-11-10 15:57: Mac A's main
+    process was 13 GB footprint but 2 MB RSS on a swapping 16 GB Mac, so RSS hides it."""
+    try:
+        if sys.platform == "darwin":
+            import ctypes
+            buf = ctypes.create_string_buffer(512)
+            libproc = ctypes.CDLL("/usr/lib/libproc.dylib")
+            if libproc.proc_pid_rusage(os.getpid(), 2, buf) != 0:  # RUSAGE_INFO_V2
+                return None
+            # rusage_info_v2: 16-byte uuid, then uint64s; ri_phys_footprint is the 8th.
+            return struct.unpack_from("<Q", buf.raw, 16 + 7 * 8)[0] / 2 ** 20
+        with open("/proc/self/status", encoding="ascii") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1]) / 1024
+    except Exception:  # noqa: BLE001 -- only for the log line
+        return None
+    return None
+
+
+def _mem_note(before):
+    """", +1700 MB (process 5200 MB)" for a warm-up log line; "" when unknown. Other threads
+    (tasks, the other warm-ups' caches) can add to the delta."""
+    after = _footprint_mb()
+    if before is None or after is None:
+        return ""
+    return f", {after - before:+.0f} MB (process {after:.0f} MB)"
+
+
 def _warm_one(name, fn):
     try:
-        t0 = time.monotonic()
+        t0, m0 = time.monotonic(), _footprint_mb()
         fn()
-        log.info("%s warm-up took %.1f s", name, time.monotonic() - t0)
+        log.info("%s warm-up took %.1f s%s", name, time.monotonic() - t0, _mem_note(m0))
     except Exception as e:  # noqa: BLE001 -- the first task will load it or report it
         log.warning("%s warm-up failed: %r", name, e)
 
@@ -1030,6 +1065,7 @@ def _warm_models():
     import cv2
     import numpy as np
     blank = np.zeros((256, 256, 3), np.uint8)
+    log.info("warm-up start: process %s MB", f"{_footprint_mb() or 0:.0f}")
     if clip_embed.enabled():
         _warm_one("CLIP", lambda: clip_embed.text_embed("warm up"))
         # The not-an-animal labels: ~90 text encodings, otherwise paid by the first animal crop.
@@ -1053,12 +1089,13 @@ def _warm_ram_plus():
     """Load RAM++ at startup with one blank frame, so the first event doesn't pay for it. Live
     2026-11-09: 1 min 41 s from CoreML's cache, inside the first tagged event after a restart."""
     try:
+        m0 = _footprint_mb()  # with the tagger: YOLO's session is small next to RAM++
         tagger = _get_tagger()
         if tagger and tagger.plus:
             import numpy as np
             t0 = time.monotonic()
             tagger.plus.tags(np.zeros((tagger.plus.SIZE, tagger.plus.SIZE, 3), np.uint8))
-            log.info("RAM++ warm-up took %.0f s", time.monotonic() - t0)
+            log.info("RAM++ warm-up took %.0f s%s", time.monotonic() - t0, _mem_note(m0))
     except Exception as e:  # noqa: BLE001 -- the first event will load it or report it
         log.warning("RAM++ warm-up failed: %r", e)
 
@@ -1104,13 +1141,15 @@ class _StageTimer:
         return (time.monotonic() - self.start) * 1000
 
 
-def _handle_recognize(console_host, mac_nosep, body):
+def _handle_recognize(console_host, mac_nosep, body, fetch=None):
     """_recognize, then one "timing" line per event, even if it failed. Live 2026-11-09: events
     waited up to 842 s in the queue, and that could only be worked out from unrelated log
-    lines. wait = queue, total = the work after it; a stage that did not run is left out."""
+    lines. wait = queue, total = the work after it; a stage that did not run is left out.
+    With a prefetch (fetch, a Future of _fetch_media), clip= and frames= are how long those
+    took on the prefetch pool, outside total; fetchwait= is the part the worker still waited."""
     timer = _StageTimer()
     try:
-        _recognize(console_host, mac_nosep, body, timer)
+        _recognize(console_host, mac_nosep, body, timer, fetch)
     finally:
         objects = sorted({str(t).lower() for key in ("roiMeta", "thumbnailMeta")
                           for t in (e["roi"].get("objectType") or
@@ -1125,10 +1164,65 @@ def _handle_recognize(console_host, mac_nosep, body):
                           + ([timer.detail] if timer.detail else [])))
 
 
-def _recognize(console_host, mac_nosep, body, timer):
-    """Fetch the task's clip, tag its key-moment and thumbnail frames, add face/plate parts
-    when asked, and POST the result; then, for postVLM, a second POST with the summary.
-    Every step is best effort: on a failure that part is left out."""
+def _frame_moments(body):
+    """(ram_moments, metas, meta_start, face_meta, meta_moments) for a video task: the key
+    moments/thumbnails RAM tags, and the extra face/plate grabs."""
+    start = int(body["start"])
+    ram_moments = set(body.get("keyMoments") or []) | set(body.get("thumbnailMs") or [])
+    metas = _wanted_metas(body)
+    meta_start = _meta_start_ms(metas, start)
+    face_meta = _flatten_meta(body.get("faceMeta")) if "face" in metas else []
+    meta_moments = {_meta_wall_ms(e["ts"], meta_start)
+                    for entries in (*metas.values(), face_meta) for e in entries}
+    return ram_moments, metas, meta_start, face_meta, meta_moments
+
+
+def _fetch_media(console_host, mac_nosep, body):
+    """Download the task's clip and grab its frames: the console and ffmpeg part of an event,
+    no models. {clip, frames, clip_ms, frames_ms}."""
+    t = time.monotonic()
+    clips_dir = os.path.join(STATE_DIR, "clips")
+    url = clip_fetch.mp4_url(console_host, CONSOLE_INTERNAL_API_PORT, body.get("reqUrl"))
+    clip = clip_fetch.fetch_clip(url, _callback_headers(mac_nosep), (CERT_PATH, KEY_PATH),
+                                 clips_dir, body.get("event"))
+    clip_ms = (time.monotonic() - t) * 1000
+    t = time.monotonic()
+    frames = {}
+    if clip and body.get("start") is not None:
+        ram_moments, *_, meta_moments = _frame_moments(body)
+        # One ffmpeg pass list for both: the meta frames are extra grabs, not key moments.
+        frames = clip_fetch.extract_frames(clip, int(body["start"]),
+                                           sorted(ram_moments | meta_moments))
+    return {"clip": clip, "frames": frames, "clip_ms": clip_ms,
+            "frames_ms": (time.monotonic() - t) * 1000}
+
+
+_prefetch_pool = None
+
+
+def _start_prefetch(console_host, mac_nosep, body):
+    """Start _fetch_media for a video task on the prefetch pool (DIYKEY_PREFETCH_WORKERS,
+    default 2, 0 = off) and return its Future, or None. Downloads then overlap the one task
+    worker's model work; the models stay one event at a time. Live 2026-11-10 08:40: an event
+    waited 26.5 s on the single worker while the one ahead of it spent 39 s downloading."""
+    global _prefetch_pool
+    body = body or {}
+    workers = _env_number("DIYKEY_PREFETCH_WORKERS", 2)
+    if workers <= 0 or not body.get("reqUrl") or not STATE_DIR \
+            or body.get("ramType") in ("image", "multipleImages"):
+        return None
+    with _task_lock:
+        if _prefetch_pool is None:
+            _prefetch_pool = concurrent.futures.ThreadPoolExecutor(
+                max_workers=workers, thread_name_prefix="diykey-prefetch")
+        pool = _prefetch_pool
+    return pool.submit(_fetch_media, console_host, mac_nosep, body)
+
+
+def _recognize(console_host, mac_nosep, body, timer, fetch=None):
+    """Fetch the task's clip (or take the prefetched one), tag its key-moment and thumbnail
+    frames, add face/plate parts when asked, and POST the result; then, for postVLM, a second
+    POST with the summary. Every step is best effort: on a failure that part is left out."""
     camera_id, event_id = body.get("camera"), body.get("event")
     result = None
     parts, images, frames = {}, {}, {}
@@ -1145,21 +1239,27 @@ def _recognize(console_host, mac_nosep, body, timer):
     elif req_url and STATE_DIR:
         t0 = time.monotonic()
         clips_dir = os.path.join(STATE_DIR, "clips")
-        url = clip_fetch.mp4_url(console_host, CONSOLE_INTERNAL_API_PORT, req_url)
-        clip = clip_fetch.fetch_clip(url, _callback_headers(mac_nosep), (CERT_PATH, KEY_PATH),
-                                     clips_dir, event_id)
-        timer.mark("clip")
+        media = None
+        if fetch is not None:
+            try:
+                media = fetch.result()
+            except Exception as e:  # noqa: BLE001 -- fetch again here instead
+                log.warning("event %s: prefetch failed (%r); fetching now", event_id, e)
+            timer.mark("fetchwait")
+        if media is None:
+            media = _fetch_media(console_host, mac_nosep, body)
+            timer.mark("clip")  # the whole fetch; split below
+            timer.stages["clip"] -= media["frames_ms"]
+            timer.stages["frames"] = media["frames_ms"]
+        else:
+            # preProcessMs: the download and frame grabs happened before this worker started.
+            t0 -= (media["clip_ms"] + media["frames_ms"]) / 1000
+            timer.stages["clip"] = media["clip_ms"]
+            timer.stages["frames"] = media["frames_ms"]
+        clip = media["clip"]
         if clip and body.get("start") is not None:
-            start = int(body["start"])
-            ram_moments = set(body.get("keyMoments") or []) | set(body.get("thumbnailMs") or [])
-            metas = _wanted_metas(body)
-            meta_start = _meta_start_ms(metas, start)
-            face_meta = _flatten_meta(body.get("faceMeta")) if "face" in metas else []
-            meta_moments = {_meta_wall_ms(e["ts"], meta_start)
-                            for entries in (*metas.values(), face_meta) for e in entries}
-            # One ffmpeg pass list for both: the meta frames are extra grabs, not key moments.
-            frames = clip_fetch.extract_frames(clip, start, sorted(ram_moments | meta_moments))
-            timer.mark("frames")
+            ram_moments, metas, meta_start, face_meta, meta_moments = _frame_moments(body)
+            frames = media["frames"]
             timer.frames = len(frames)
             ram_frames = {ms: p for ms, p in frames.items() if ms in ram_moments}
             log.info("event %s: %d/%d frames (%d for face/lpr)", event_id, len(frames),
