@@ -517,7 +517,7 @@ def thumbnail_tags(tagger, objects, frame_tags=None):
                        .get("objectType") or "").lower()
         t0 = time.monotonic()
         raw = clip_embed.image_embed(o["img"])
-        _prof_add("clip", t0)
+        _prof_add("clipemb", t0)
         veto = clip_veto_threshold()
         if obj_type == "animal" and raw and veto > 0:
             t0 = time.monotonic()

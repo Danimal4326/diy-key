@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (C) 2026 hutchx86
 """Unit tests for ucp4_client.py: wire framing, state and RPC handlers."""
+import concurrent.futures
 import json
 import os
 import shutil
@@ -788,6 +789,79 @@ class TestRecognizeTiming(_RecognizeTest):
         self.assertTrue(ucp4_client._submit_task("timing-test", task, ()))
         self.assertTrue(done.wait(5))
         self.assertGreaterEqual(seen[0], 0)
+
+
+class TestFootprint(unittest.TestCase):
+    """Warm-up lines say what each model added (live 2026-11-10: 13 GB, 2 MB RSS)."""
+
+    def test_footprint_is_this_process(self):
+        mb = ucp4_client._footprint_mb()
+        self.assertIsNotNone(mb)
+        self.assertGreater(mb, 1)
+
+    def test_note_shows_the_delta_and_total(self):
+        with mock.patch.object(ucp4_client, "_footprint_mb", return_value=5200.0):
+            self.assertEqual(ucp4_client._mem_note(3500.0), ", +1700 MB (process 5200 MB)")
+            self.assertEqual(ucp4_client._mem_note(None), "")
+
+    def test_warm_one_logs_it(self):
+        with mock.patch.object(ucp4_client, "_footprint_mb", side_effect=[100.0, 400.0]), \
+                self.assertLogs(ucp4_client.log, "INFO") as cm:
+            ucp4_client._warm_one("CLIP", lambda: None)
+        self.assertRegex(cm.output[0], r"CLIP warm-up took [0-9.]+ s, \+300 MB \(process 400 MB\)")
+
+
+class TestPrefetch(_RecognizeTest):
+    """Clip download + frame grabs start when the task arrives, on their own pool; the one
+    task worker only runs the models (live 2026-11-10 08:40: 26.5 s queued behind a 39 s
+    download)."""
+
+    def _timing(self, cm):
+        return next(r.getMessage() for r in cm.records if "timing ms" in r.getMessage())
+
+    def test_prefetched_clip_and_frames_are_used(self):
+        body = self._body()
+        fut = concurrent.futures.Future()
+        fut.set_result(ucp4_client._fetch_media("10.0.0.5", "fcecdaaabbcc", body))
+        ucp4_client.clip_fetch.fetch_clip.reset_mock()
+        n_extract = len(self.extracted)
+        with self.assertLogs(ucp4_client.log, "INFO") as cm, \
+                mock.patch.object(ucp4_client.face_recog, "build_face_result"), \
+                mock.patch.object(ucp4_client.lpr, "build_lpr"):
+            ucp4_client._handle_recognize("10.0.0.5", "fcecdaaabbcc", body, fut)
+        ucp4_client.clip_fetch.fetch_clip.assert_not_called()
+        self.assertEqual(len(self.extracted), n_extract)
+        line = self._timing(cm)
+        self.assertRegex(line, r"frames=3 wait=\d+ total=\d+ fetchwait=\d+ clip=\d+ frames=\d+")
+
+    def test_failed_prefetch_fetches_again(self):
+        fut = concurrent.futures.Future()
+        fut.set_exception(RuntimeError("boom"))
+        with self.assertLogs(ucp4_client.log, "INFO") as cm, \
+                mock.patch.object(ucp4_client.face_recog, "build_face_result"), \
+                mock.patch.object(ucp4_client.lpr, "build_lpr"):
+            ucp4_client._handle_recognize("10.0.0.5", "fcecdaaabbcc", self._body(), fut)
+        ucp4_client.clip_fetch.fetch_clip.assert_called_once()
+        self.assertTrue(any("prefetch failed" in r.getMessage() for r in cm.records))
+        self.assertIn("frames=3 wait=", self._timing(cm))
+
+    def test_started_for_video_tasks_only(self):
+        self.addCleanup(setattr, ucp4_client, "_prefetch_pool", None)
+        fut = ucp4_client._start_prefetch("h", "m", self._body())
+        self.assertEqual(len(fut.result(5)["frames"]), 3)
+        self.assertIsNone(ucp4_client._start_prefetch("h", "m", self._body(ramType="image")))
+        self.assertIsNone(ucp4_client._start_prefetch("h", "m", self._body(reqUrl=None)))
+        with mock.patch.dict(os.environ, {"DIYKEY_PREFETCH_WORKERS": "0"}):
+            self.assertIsNone(ucp4_client._start_prefetch("h", "m", self._body()))
+
+    def test_dispatch_hands_the_prefetch_to_the_task_and_cancels_when_dropped(self):
+        fut = mock.Mock()
+        with mock.patch.object(ucp4_client, "_start_prefetch", return_value=fut), \
+                mock.patch.object(ucp4_client, "_submit_task", return_value=False) as submit:
+            ucp4_client.handle_action({"action": "recognizeKeyFrames"}, self._body(),
+                                      {"console_host": "h", "mac_nosep": "m"})
+        self.assertIs(submit.call_args.args[2][3], fut)
+        fut.cancel.assert_called_once()
 
 
 class TestSummaryQueue(_RecognizeTest):

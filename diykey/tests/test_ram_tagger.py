@@ -55,9 +55,9 @@ class RamImagesTest(unittest.TestCase):
         ram_tagger.build_result(FakeTagger(), "cam", "ev", {1000: self.path}, objects=objects)
         stats = ram_tagger.prof_take()
         self.assertEqual({k: v[1] for k, v in stats.items()},
-                         {"ramframes": 1, "crops": 1, "clip": 1, "reid": 1})
+                         {"ramframes": 1, "crops": 1, "clipemb": 1, "reid": 1})
         self.assertRegex(ram_tagger.prof_format(stats),
-                         r"^ramframes=1 crops=1 clip=\d+/1 reid=\d+/1$")
+                         r"^ramframes=1 crops=1 clipemb=\d+/1 reid=\d+/1$")
 
     def test_profile_off_outside_a_task(self):
         ram_tagger.prof_take()
