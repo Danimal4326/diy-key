@@ -1,5 +1,8 @@
 # Find Anything / CLIP (stage3_wss/clip_embed.py), only with DIYKEY_CLIP=1.
 # Install on top of requirements.txt: pip install -r diykey/requirements-clip.txt
+# The torch backend needs torch + open_clip_torch; the ONNX one (DIYKEY_CLIP_ONNX, exported with
+# scripts/export_clip_onnx.py) only Pillow + tokenizers, with requirements.txt's onnxruntime.
 torch>=2.4
 open_clip_torch>=2.24
 Pillow>=10
+tokenizers>=0.20

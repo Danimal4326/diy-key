@@ -32,6 +32,20 @@ Xe), per real frame: YOLOv9-s 320 px 22.6 -> 13.2 ms, YOLO11m 640 px 202.9 -> 63
 rebuilt container skips most of the ~3 s first compile. Without `/dev/dri`, or with the plain
 image, the setting falls back to CPU with a warning.
 
+### Find Anything without torch
+
+`TORCH=1` is one way to run CLIP; the other keeps the image torch-free and puts CLIP on the
+iGPU too. Export the model once, on any machine with torch:
+
+```bash
+python3 scripts/export_clip_onnx.py /srv/diykey/models/clip   # ~1.7 GB; checks itself against torch
+```
+
+then run the `ORT=openvino` image with `DIYKEY_CLIP=1`, `DIYKEY_NL_SEARCH=1`,
+`DIYKEY_CLIP_ONNX=/data/models/clip` and `DIYKEY_ORT_DEVICE=GPU`. Measured on an Iris Xe against
+the torch backend on real camera crops: an image 131 ms (torch CPU 660 ms), a query 17 ms (65),
+embeddings cosine >= 0.99976 and the same best-matching query for every crop.
+
 ## Running it
 
 Give it its own LAN address, as the systemd instances get a macvlan child: the console must
