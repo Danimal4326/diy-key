@@ -27,74 +27,20 @@ class EmbedTest(unittest.TestCase):
             self.assertIsNone(reid_model.embed(np.zeros((8, 8, 3), np.uint8)))
 
     def test_model_failure_returns_none_instead_of_raising(self):
-        class _Tensor:
-            def unsqueeze(self, n):
-                return self
-
-            def to(self, device):
-                return self
-
-        class _Torch:
-            @staticmethod
-            def from_numpy(x):
-                return _Tensor()
-
-            class no_grad:
-                def __enter__(self):
-                    return None
-
-                def __exit__(self, *args):
-                    return False
-
-        class _Model:
-            def __call__(self, tensor):
-                raise RuntimeError("mps oom")
+        def run(x):
+            raise RuntimeError("mps oom")
 
         img = np.zeros((32, 16, 3), np.uint8)
         with mock.patch.dict(os.environ, ENV), \
-                mock.patch.object(reid_model, "_load", return_value=(_Model(), "cpu", _Torch)), \
+                mock.patch.object(reid_model, "_load", return_value=run), \
                 self.assertLogs("diykey.reid", "WARNING"):
             self.assertIsNone(reid_model.embed(img))
 
     def test_raw_vector_is_model_native_and_embed_pads_to_1024(self):
-        class _Vec:
-            def float(self):
-                return self
-
-            def cpu(self):
-                return self
-
-            @staticmethod
-            def numpy():
-                return np.full((1, 512), 0.5, np.float32)
-
-        class _Tensor:
-            def unsqueeze(self, n):
-                return self
-
-            def to(self, device):
-                return self
-
-        class _Torch:
-            @staticmethod
-            def from_numpy(x):
-                return _Tensor()
-
-            class no_grad:
-                def __enter__(self):
-                    return None
-
-                def __exit__(self, *args):
-                    return False
-
-        class _Model:
-            def __call__(self, tensor):
-                return _Vec()
-
+        run = mock.Mock(return_value=np.full((1, 512), 0.5, np.float32))
         img = np.zeros((32, 16, 3), np.uint8)
         with mock.patch.dict(os.environ, ENV), \
-                mock.patch.object(reid_model, "_load",
-                                  return_value=(_Model(), "cpu", _Torch)):
+                mock.patch.object(reid_model, "_load", return_value=run):
             raw = reid_model.embed_raw(img)
             padded = reid_model.embed(img)
         self.assertEqual(len(raw), 512)
@@ -109,12 +55,82 @@ class EmbedTest(unittest.TestCase):
             if isinstance(m, torch.nn.BatchNorm1d):
                 torch.nn.init.constant_(m.bias, 5.0)
         img = np.random.default_rng(1).integers(0, 255, (300, 120, 3), np.uint8)
+
+        def run(x):
+            with torch.no_grad():
+                return model(torch.from_numpy(x)).numpy()
         with mock.patch.dict(os.environ, ENV), \
-                mock.patch.object(reid_model, "_load", return_value=(model, "cpu", torch)):
+                mock.patch.object(reid_model, "_load", return_value=run):
             vec = reid_model.embed(img)
         self.assertEqual(len(vec), 1024)
         self.assertEqual(set(vec[512:]), {0.0})
         self.assertGreater(float(np.linalg.norm(vec)), 2.0)  # Protect's limit is L2 20-30
+
+    def test_preprocess_shape(self):
+        for h, w in ((300, 120), (8, 8), (1080, 40)):
+            x = reid_model.preprocess(np.zeros((h, w, 3), np.uint8))
+            self.assertEqual((x.shape, x.dtype), ((1, 3, 256, 128), np.float32))
+            self.assertTrue(x.flags["C_CONTIGUOUS"])
+
+
+class FakeSession:
+    """onnxruntime.InferenceSession stand-in returning a raw (1, 512) vector."""
+
+    class _Input:
+        name = "pixels"
+
+    def __init__(self):
+        self.fed = []
+
+    def get_inputs(self):
+        return [self._Input()]
+
+    def get_providers(self):
+        return ["OpenVINOExecutionProvider", "CPUExecutionProvider"]
+
+    def get_provider_options(self):
+        return {"OpenVINOExecutionProvider": {"device_type": "GPU"}}
+
+    def run(self, outputs, feed):
+        self.fed.append(feed["pixels"].shape)
+        return [np.full((1, 512), 3.0, np.float32)]
+
+
+class BackendChoiceTest(unittest.TestCase):
+    def setUp(self):
+        reid_model._loaded = None
+        self.addCleanup(setattr, reid_model, "_loaded", None)
+
+    def test_onnx_file_runs_in_onnxruntime_on_the_configured_device(self):
+        sess = FakeSession()
+        with mock.patch.dict(os.environ, {"DIYKEY_REID_MODEL": "/m/osnet.onnx"}), \
+                mock.patch.object(reid_model.ort_device, "session", return_value=sess) as made, \
+                mock.patch.object(reid_model, "_torch_runner", side_effect=AssertionError("torch")), \
+                mock.patch.dict(sys.modules, {"onnxruntime": mock.Mock()}), \
+                self.assertLogs("diykey.reid", "INFO") as logs:
+            vec = reid_model.embed(np.zeros((300, 120, 3), np.uint8))
+        self.assertEqual(made.call_args[0][1:], ("/m/osnet.onnx", ["CPUExecutionProvider"], "re-ID"))
+        self.assertEqual(sess.fed, [(1, 3, 256, 128)])
+        self.assertIn("OpenVINO GPU", logs.output[0])
+        self.assertEqual(len(vec), 1024)
+        self.assertEqual(vec[0], 3.0)        # raw, not unit length
+        self.assertEqual(set(vec[512:]), {0.0})
+
+    def test_pth_file_runs_in_torch(self):
+        run = mock.Mock(return_value=np.ones((1, 512), np.float32))
+        with mock.patch.dict(os.environ, ENV), \
+                mock.patch.object(reid_model, "_torch_runner", return_value=(run, "torch cpu")) as tr, \
+                mock.patch.object(reid_model, "_onnx_runner", side_effect=AssertionError("onnx")):
+            self.assertEqual(len(reid_model.embed(np.zeros((9, 9, 3), np.uint8))), 1024)
+        tr.assert_called_once_with("/m.pth")
+
+    def test_failed_load_warns_once_and_gives_none(self):
+        with mock.patch.dict(os.environ, {"DIYKEY_REID_MODEL": "/m/missing.onnx"}), \
+                mock.patch.object(reid_model, "_onnx_runner", side_effect=FileNotFoundError("x")), \
+                self.assertLogs("diykey.reid", "WARNING") as logs:
+            self.assertIsNone(reid_model.embed(np.zeros((9, 9, 3), np.uint8)))
+            self.assertIsNone(reid_model.embed(np.zeros((9, 9, 3), np.uint8)))  # not retried
+        self.assertEqual(len(logs.records), 1)
 
 
 class FakeTagger:
