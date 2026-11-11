@@ -28,6 +28,12 @@ Backends (DIYKEY_VLM, default "off" so nothing loads unless asked):
                 AI Key firmware (/usr/local/lib/vlm-model); Ubiquiti's fine-tune
                 is not redistributable, so DIY-Key never ships or fetches it.
                 OpenGVLab/InternVL2_5-1B (MIT) is the public stand-in.
+  openvino      OpenVINO GenAI's VLMPipeline (openvino-genai) on an Intel GPU or CPU, no
+                torch. DIYKEY_VLM_MODEL is a folder with an OpenVINO export, e.g. Hugging
+                Face OpenVINO/InternVL2-1B-int4-ov (MIT, the firmware's model family) or
+                OpenVINO/Qwen3-VL-4B-Instruct-int4-ov (Apache-2.0). Device: DIYKEY_VLM_DEVICE,
+                else DIYKEY_ORT_DEVICE's OpenVINO device, else CPU; compiled models are
+                cached with the onnxruntime ones (ort_device.cache_dir()).
 
 Imports are lazy, so the module costs nothing when off; a missing dependency
 logs once and every call returns None. One inference at a time under a module
@@ -40,6 +46,8 @@ import threading
 
 import cv2
 import numpy as np
+
+import ort_device
 
 log = logging.getLogger("diykey.vlm")
 
@@ -66,7 +74,8 @@ PROMPT = (
 _REDUNDANT = ("The image shows ", "The image depicts ",
               "The image captures ", "The image features ")
 
-BACKENDS = ("mlx", "transformers", "off")
+BACKENDS = ("mlx", "transformers", "openvino", "off")
+BACKENDS_ON = BACKENDS[:-1]
 
 _lock = threading.Lock()        # one inference at a time
 _load_lock = threading.Lock()
@@ -165,6 +174,41 @@ def _transformers_backend(model_path):
     return run
 
 
+def device():
+    """The OpenVINO device the openvino backend runs on."""
+    return ((os.environ.get("DIYKEY_VLM_DEVICE") or "").strip().upper()
+            or ort_device.openvino_device() or "CPU")
+
+
+def _openvino_backend(model_dir):
+    import openvino as ov
+    import openvino_genai
+    from PIL import Image
+
+    dev = device()
+    props = {}
+    try:
+        os.makedirs(ort_device.cache_dir(), exist_ok=True)
+        props["CACHE_DIR"] = ort_device.cache_dir()
+    except OSError:
+        pass
+    pipe = openvino_genai.VLMPipeline(model_dir, dev, **props)
+    config = openvino_genai.GenerationConfig()
+    config.max_new_tokens = MAX_NEW_TOKENS
+    config.do_sample = False
+    config.repetition_penalty = REPETITION_PENALTY
+
+    def run(rgb, prompt):
+        # Single-tile like the firmware (see _mlx_backend).
+        pil = Image.fromarray(rgb)
+        pil.thumbnail((TILE, TILE), Image.LANCZOS)
+        image = ov.Tensor(np.ascontiguousarray(np.asarray(pil))[None])
+        out = pipe.generate(SYSTEM + "\n" + prompt, images=[image], generation_config=config)
+        return out.texts[0] if getattr(out, "texts", None) else str(out)
+    run.where, run.pipe = f"OpenVINO {dev}", pipe
+    return run
+
+
 def _get_backend(name, model):
     key = (name, model)
     if key in _loaded:
@@ -177,18 +221,20 @@ def _get_backend(name, model):
         try:
             if not model:
                 raise ValueError("DIYKEY_VLM_MODEL is not set")
-            fn = (_mlx_backend if name == "mlx" else _transformers_backend)(model)
+            fn = {"mlx": _mlx_backend, "openvino": _openvino_backend}.get(
+                name, _transformers_backend)(model)
         except Exception as e:  # ImportError included: missing deps
             _failed.add(key)
             log.warning("VLM %s backend unavailable (%s): %s", name, model, e)
             return None
-        log.info("VLM %s backend loaded: %s", name, model)
+        log.info("VLM %s backend loaded: %s%s", name, model,
+                 f" on {fn.where}" if getattr(fn, "where", None) else "")
         _loaded[key] = fn
         return fn
 
 
 def enabled():
-    return os.environ.get("DIYKEY_VLM", "off").strip().lower() in ("mlx", "transformers")
+    return os.environ.get("DIYKEY_VLM", "off").strip().lower() in BACKENDS_ON
 
 
 def describe(bgr, backend=None, context=None, crop_top=True):
@@ -202,7 +248,7 @@ def describe(bgr, backend=None, context=None, crop_top=True):
     try:
         if backend is None:
             name = os.environ.get("DIYKEY_VLM", "off").strip().lower()
-            if name not in ("mlx", "transformers"):
+            if name not in BACKENDS_ON:
                 if name != "off" and ("bad", name) not in _failed:
                     _failed.add(("bad", name))
                     log.warning("DIYKEY_VLM=%r unknown (want %s)", name, BACKENDS)

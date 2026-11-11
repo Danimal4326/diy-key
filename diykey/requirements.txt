@@ -22,5 +22,8 @@ torch>=2.4
 open_clip_torch>=2.24
 Pillow>=10
 tokenizers>=0.20
-# NeXT AI Summary (stage3_wss/vlm_describe.py), only with DIYKEY_VLM=mlx (Apple Silicon); tested with:
+# NeXT AI Summary (stage3_wss/vlm_describe.py), only with DIYKEY_VLM set. mlx (Apple Silicon),
+# tested with:
 # mlx-vlm==0.7.12
+# openvino (Intel GPU/CPU; docker/Dockerfile ORT=openvino installs it), tested with:
+# openvino-genai==2026.4.1.0

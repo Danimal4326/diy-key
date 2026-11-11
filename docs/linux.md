@@ -64,7 +64,8 @@ DIYKEY_RAM_MODEL=/root/models/yolov9-s-320.onnx
 # DIYKEY_LPR=1           # licence plate recognition
 # DIYKEY_FACE_ENHANCE=1  # face enhancement
 # DIYKEY_FACE_ENHANCE_MODEL=/path/to/gfpgan_1.4.onnx
-# DIYKEY_VLM=mlx         # AI summary: mlx (macOS only) or transformers; off/0 or unset = off
+# DIYKEY_VLM=mlx         # AI summary: mlx (macOS only), transformers or openvino (Intel GPU/CPU,
+#                        # needs openvino-genai; see docs/docker.md); off/0 or unset = off
 # DIYKEY_VLM_MODEL=mlx-community/<SmolVLM2 or Qwen3-VL-2B repo>
 # DIYKEY_TASK_WORKERS=1
 # DIYKEY_TASK_QUEUE_MAX=200
