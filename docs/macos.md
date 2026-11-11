@@ -76,8 +76,9 @@ restart           touch to restart DIY-Key
 | `DIYKEY_RAM_MODEL` | COCO ONNX detector for tags, verification and crops; also advertises Recognize Anything and retroactive processing. Unset = no RAM result |
 | `DIYKEY_CLIP=1` | CLIP ViT-L/14 embeddings: per-object rows for search, query embeddings |
 | `DIYKEY_FACE`, `DIYKEY_LPR`, `DIYKEY_FACE_ENHANCE` | `1` to advertise face recognition, licence plates, face enhancement (default off) |
-| `DIYKEY_VLM` | AI summary backend, `mlx` or `transformers`; unset, `off` or `0` = not advertised |
-| `DIYKEY_VLM_MODEL` | AI summary model: an mlx-community repo (`mlx`) or a local InternVL2-style checkpoint path (`transformers`) |
+| `DIYKEY_VLM` | AI summary backend, `mlx`, `transformers` or `openvino` (OpenVINO GenAI, Intel GPU/CPU); unset, `off` or `0` = not advertised |
+| `DIYKEY_VLM_MODEL` | AI summary model: an mlx-community repo (`mlx`), a local InternVL2-style checkpoint path (`transformers`) or a folder with an OpenVINO export such as `OpenVINO/Qwen3-VL-4B-Instruct-int4-ov` (`openvino`) |
+| `DIYKEY_VLM_DEVICE` | `openvino` backend device (`GPU`, `CPU`, ...); default `DIYKEY_ORT_DEVICE`'s OpenVINO device, else CPU |
 | `DIYKEY_DEEP_MODE` | `1` (with `DIYKEY_VLM`) advertises `supportDeepMode`/`supportVlm`. Protect then sends `modelMode: deep` when Deep Understanding is on for the NVR, turns RAM off on this key, and dispatches `RequestAI :7968/describe`; the key replies with a VLM description of a representative frame, `labels` from the RAM tagger if `DIYKEY_RAM_MODEL` is set, and (with `DIYKEY_CLIP=1` and `DIYKEY_DESC_EMBED=1`) a CLIP text embedding. `getInfo` reports `aiMode: deep` only when this is on. Person re-ID needs a 1024-d re-ID model (CLIP is 768-d), so `:7445/generate-embeddings` tasks are answered as failed |
 | `DIYKEY_FACE_MODELS` | Folder holding the YuNet and SFace `.onnx` files (default `<diykey>/models`) |
 | `DIYKEY_FACE_ENHANCE_MODEL` | GFPGAN v1.4 ONNX for face enhancement; unset = the original face is uploaded |

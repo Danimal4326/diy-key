@@ -19,7 +19,10 @@
 # ORT=openvino (amd64) swaps onnxruntime for onnxruntime-openvino and adds Intel's GPU compute
 # runtime, so DIYKEY_ORT_DEVICE=GPU runs the onnxruntime models on an Intel iGPU/Arc (see
 # stage3_wss/ort_device.py; run with --device /dev/dri). Debian trixie has no intel-opencl-icd,
-# so these are Intel's release debs, sha256-pinned (the same ones diy-port's image uses).
+# so these are Intel's release debs, sha256-pinned (the same ones diy-port's image uses). It also
+# adds OpenVINO GenAI (OV_GENAI, ~200 MB) for AI Summary on the GPU (DIYKEY_VLM=openvino); it
+# brings its own OpenVINO runtime next to the one inside onnxruntime-openvino, and both run in one
+# process (checked 2026-11-11: detector session on the GPU before and after a VLM summary).
 #
 # Run it with its own LAN address (macvlan) and NET_ADMIN, like the systemd instances: the
 # console must reach :8080 and :5432, and discovery is UDP broadcast.
@@ -33,6 +36,7 @@ ARG NEO_TAG=26.35.39758.10
 ARG IGC_TAG=v2.41.5
 ARG IGC_VER=2.41.5+22716
 ARG GMMLIB_VER=22.10.0
+ARG OV_GENAI=2026.4.1.0
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
@@ -80,7 +84,9 @@ RUN python3 -m venv "$VIRTUAL_ENV" \
     fi \
  && if [ "$ORT" = "openvino" ]; then \
         pip uninstall -y onnxruntime && pip install --no-cache-dir onnxruntime-openvino \
-     && python3 -c 'import onnxruntime as o, sys; sys.exit("OpenVINOExecutionProvider" not in o.get_available_providers())'; \
+     && python3 -c 'import onnxruntime as o, sys; sys.exit("OpenVINOExecutionProvider" not in o.get_available_providers())' \
+     && pip install --no-cache-dir "openvino-genai==$OV_GENAI" \
+     && python3 -c 'import openvino_genai; openvino_genai.VLMPipeline'; \
     fi \
  && rm -f /tmp/requirements*.txt
 

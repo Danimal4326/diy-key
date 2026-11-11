@@ -115,7 +115,7 @@ def _feature_flags(env=None):
     # Only the backends vlm_describe implements can answer a summary. With DIYKEY_VLM
     # unset we still advertise it, like the firmware; setting it to an unsupported backend
     # is an explicit override and hides the flag.
-    vlm = (env.get("DIYKEY_VLM") or "").strip().lower() in ("mlx", "transformers")
+    vlm = (env.get("DIYKEY_VLM") or "").strip().lower() in vlm_describe.BACKENDS_ON
     return {
         "supportPoseEstimation": _feature(True),
         # Gates the Person class in Second Stage Verification: Protect builds the NVR's in-memory
