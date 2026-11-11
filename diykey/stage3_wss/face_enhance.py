@@ -53,6 +53,8 @@ import threading
 import cv2
 import numpy as np
 
+import ort_device
+
 log = logging.getLogger("diykey.face_enhance")
 
 SIZE = 512
@@ -126,9 +128,9 @@ def _load_session():
         return None
     try:
         import onnxruntime as ort
-        _session = ort.InferenceSession(path, providers=_providers(
-            path, ort.get_available_providers()))
-        log.info("face enhance: loaded %s (%s)", path, _session.get_providers())
+        base = _providers(path, ort.get_available_providers()) or ["CPUExecutionProvider"]
+        _session = ort_device.session(ort, path, base, "face enhance")
+        log.info("face enhance: loaded %s (%s)", path, ort_device.describe(_session))
     except Exception as e:  # noqa: BLE001 - any load failure means pass-through
         _warn_once("load", "face enhance: load %s failed: %s", path, e)
         _load_failed = True
