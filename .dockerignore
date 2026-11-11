@@ -1,0 +1,8 @@
+.git
+**/__pycache__
+**/*.pyc
+diykey/instances
+diykey/tests
+*.onnx
+*.pth
+*.rknn

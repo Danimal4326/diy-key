@@ -4,6 +4,7 @@
 How to run the AI work on the deployed runtime: Debian/Ubuntu on an Orange Pi 5 Plus, one
 systemd unit per instance, a system PostgreSQL with pgvector. The macOS workflow is unchanged;
 see [`macos.md`](macos.md).
+To run it in a container (Docker/Podman, PostgreSQL included) instead, see [`docker.md`](docker.md).
 
 ## What runs where
 
