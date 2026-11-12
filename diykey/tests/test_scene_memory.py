@@ -612,5 +612,29 @@ class TestFailureIsolation(SceneTest):
         self.assertIsNone(sm.summary_text(None, sm.EventScene()))
 
 
+class TestLegacyKinds(SceneTest):
+    def test_body_type_aliases_are_known(self):
+        for otype in ("vehicle", "car", "truck", "bus", "motorcycle", "bicycle", "suv", "van",
+                      "motorbike", "bike", "pickup truck"):
+            self.assertEqual(sm._kind(otype), sm.VEHICLE, otype)
+        for otype in ("animal", "dog", "cat", "bird"):
+            self.assertEqual(sm._kind(otype), sm.ANIMAL, otype)
+        self.assertEqual(sm._kind("person"), sm.PERSON)
+
+    def test_hide_words_cover_the_tagger_vocabulary(self):
+        self.assertTrue({"deer", "raccoon", "squirrel", "wildlife"}
+                        <= sm._HIDE_WORDS[sm.ANIMAL])
+        self.assertTrue({"ambulance", "scooter", "suv", "van"}
+                        <= sm._HIDE_WORDS[sm.VEHICLE])
+
+
+class TestEventOrder(SceneTest):
+    def test_an_older_event_does_not_rewind_the_clock(self):
+        self.event(self.later(60), [obj("car", SPOT)], [trig(self.later(60), ROAD)])
+        before = self.entries()
+        self.assertIsNone(self.event(T0, [obj("car", SPOT)], [trig(T0, ROAD)]))
+        self.assertEqual(self.entries(), before)
+
+
 if __name__ == "__main__":
     unittest.main()

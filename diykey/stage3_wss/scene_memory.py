@@ -68,19 +68,20 @@ BLIND_IOU = 0.5             # box match needed when there is no fingerprint for 
 
 VEHICLE, ANIMAL, PERSON = "vehicle", "animal", "person"
 _KINDS = {
-    **{k: VEHICLE for k in ("vehicle", "car", "truck", "bus", "motorcycle", "bicycle")},
-    **{k: ANIMAL for k in ("animal", *ram_tagger.FAMILY["animal"])},
+    VEHICLE: VEHICLE,
+    ANIMAL: ANIMAL,
     PERSON: PERSON,
+    # car/truck/suv/... and dog/cat/bird from the same alias map the tagger uses.
+    **ram_tagger.TYPE_ALIASES,
+    **{k: ANIMAL for k in ram_tagger.FAMILY["animal"]},
 }
 
 # Whole-frame tags hidden with their kind; matched on the tag's last word ("white car", "sports
 # car"; "car park" stays).
 _HIDE_WORDS = {
-    VEHICLE: {"car", "sedan", "suv", "truck", "van", "bus", "motorcycle", "bicycle", "bike",
-              "vehicle", "minivan", "pickup", "taxi", "limo", "jeep", "coupe", "hatchback",
-              "automobile"},
-    ANIMAL: {"animal", "pet", "dog", "puppy", "cat", "kitten", "bird", "horse", "sheep", "cow",
-             "bear", "elephant", "zebra", "giraffe"},
+    VEHICLE: set(ram_tagger.KIND_WORDS["vehicle"])
+             | {"minivan", "pickup", "limo", "coupe", "hatchback", "automobile"},
+    ANIMAL: set(ram_tagger.KIND_WORDS["animal"]),
 }
 
 STATIONARY, FIXTURE, CANDIDATE = "stationary", "fixture", "candidate"
@@ -194,13 +195,14 @@ def _load(path):
             data = json.load(f)
         if data.get("version") == VERSION and isinstance(data.get("entries"), list):
             data.setdefault("events", [])
+            data.setdefault("last_event_ms", 0)
             return data
         log.warning("scene memory %s has an unknown format; starting again", path)
     except FileNotFoundError:
         pass
     except (OSError, ValueError, AttributeError) as e:
         log.warning("scene memory %s unreadable (%r); starting again", path, e)
-    return {"version": VERSION, "entries": [], "events": []}
+    return {"version": VERSION, "entries": [], "events": [], "last_event_ms": 0}
 
 
 def _camera_lock(camera_id):
@@ -448,6 +450,12 @@ def _observe(state_dir, tagger, camera_id, event_id, frames, triggers, embed, na
         if event_id in store["events"]:
             log.info("event %s: scene memory already saw this event", event_id)
             return None
+        last_ms = int(store.get("last_event_ms") or 0)
+        if now < last_ms:
+            log.warning("event %s: scene clock %s is older than the last learned event (%s); "
+                        "not learning it", event_id, now, last_ms)
+            return None
+        store["last_event_ms"] = now
         entries = _expire(store["entries"], now, rules, keep_ms)
         clusters = _detect_clusters(tagger, images)
         _fingerprint_clusters(clusters, embed)
