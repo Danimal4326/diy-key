@@ -1,6 +1,6 @@
 # Memory and speed: Mac A's five questions (2026-11-10)
 
-Mac A's live instance "Mac A" (16 GB Mac) was swapping. After warm-up its main process held
+The live instance on Mac A (16 GB Mac) was swapping. After warm-up its main process held
 about 13.1 GB, and between 13:00 and 15:30 the task queue waited up to 899 s and dropped 22 jobs.
 The warm-up log (commit `81b251c`) added, per model: CLIP ViT-L-14-quickgelu FP32 on torch/MPS
 +3,077 MB, SmolVLM2-2.2B MLX +4,268 MB, GFPGAN 1.4 on onnxruntime CoreML +5,284 MB, and RAM++
