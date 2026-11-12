@@ -188,11 +188,16 @@ def embed(img_bgr):
     if not loaded:
         return None
     model, device, torch = loaded
-    rgb = cv2.cvtColor(cv2.resize(img_bgr, _SIZE, interpolation=cv2.INTER_LINEAR), cv2.COLOR_BGR2RGB)
-    x = (rgb.astype(np.float32) / 255.0 - _MEAN) / _STD
-    tensor = torch.from_numpy(x.transpose(2, 0, 1)).unsqueeze(0).to(device)
-    with _lock, torch.no_grad():
-        v = model(tensor).float().cpu().numpy().reshape(-1)
+    try:
+        rgb = cv2.cvtColor(cv2.resize(img_bgr, _SIZE, interpolation=cv2.INTER_LINEAR),
+                           cv2.COLOR_BGR2RGB)
+        x = (rgb.astype(np.float32) / 255.0 - _MEAN) / _STD
+        tensor = torch.from_numpy(x.transpose(2, 0, 1)).unsqueeze(0).to(device)
+        with _lock, torch.no_grad():
+            v = model(tensor).float().cpu().numpy().reshape(-1)
+    except Exception as e:  # noqa: BLE001 - one bad crop must not lose the event's other tags
+        log.warning("re-ID failed on a %s crop: %r", img_bgr.shape[:2], e)
+        return None
     if not np.isfinite(v).all():
         return None
     return [float(f) for f in v] + [0.0] * (REID_DIM - v.size)

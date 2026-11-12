@@ -24,6 +24,36 @@ class EmbedTest(unittest.TestCase):
         with mock.patch.dict(os.environ, {"DIYKEY_REID_MODEL": ""}):
             self.assertIsNone(reid_model.embed(np.zeros((8, 8, 3), np.uint8)))
 
+    def test_model_failure_returns_none_instead_of_raising(self):
+        class _Tensor:
+            def unsqueeze(self, n):
+                return self
+
+            def to(self, device):
+                return self
+
+        class _Torch:
+            @staticmethod
+            def from_numpy(x):
+                return _Tensor()
+
+            class no_grad:
+                def __enter__(self):
+                    return None
+
+                def __exit__(self, *args):
+                    return False
+
+        class _Model:
+            def __call__(self, tensor):
+                raise RuntimeError("mps oom")
+
+        img = np.zeros((32, 16, 3), np.uint8)
+        with mock.patch.dict(os.environ, ENV), \
+                mock.patch.object(reid_model, "_load", return_value=(_Model(), "cpu", _Torch)), \
+                self.assertLogs("diykey.reid", "WARNING"):
+            self.assertIsNone(reid_model.embed(img))
+
     def test_padded_to_protect_width_and_not_normalised(self):
         import torch
         model = reid_model._build().eval()
