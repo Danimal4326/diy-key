@@ -123,7 +123,9 @@ adoption; the token is single-use.
 - Real RK3588 telemetry (CPU, GPU, NPU, memory) and a flat `systemMetrics` shape.
 - Task plumbing for RAM/reverification results, multipart `ram` upload and the
   console's `/internal/aiprocessors/*` callbacks.
-- Shared config/state layer, per-instance systemd units, and 98 unit tests.
+- Shared config/state layer, per-instance systemd units, and 445 unit tests.
+- Wired AI work in `stage3_wss/`: SFace face recognition, fast-alpr plates, GFPGAN
+  enhancement, VLM summaries, OSNet re-ID and per-camera scene memory.
 - Face detection (`RetinaFace_mobile320`) and embedding (`w600k_mbf`) running on
   the RK3588 NPU — see the limitation below before using the embeddings.
 
@@ -186,7 +188,7 @@ console pins the fingerprint.
 No hardware needed:
 
 ```bash
-cd diykey && python3 -m unittest discover -s tests -v   # 98 tests
+cd diykey && python3 -m unittest discover -s tests -v   # 445 tests
 ```
 
 Verified live on an Orange Pi 5 Plus against a real UNVR (2026-09-07): discovery,
@@ -205,8 +207,9 @@ service being dialled by a console, and face results delivered end to end.
   128-d SFace; `stage5_faceid/` uses 512-d MobileFaceNet. Detection/alignment are
   fine; the embeddings cannot be enrolled as-is (`protocol.md` §7.1).
 - RAM tagging and second-stage verification need `DIYKEY_RAM_MODEL`; without it
-  the result is a placeholder. LPR, speech-to-text and VLM descriptions are not
-  implemented.
+  the result is a placeholder. LPR, face recognition, face enhancement and VLM
+  descriptions are implemented but need their models and `DIYKEY_*` switch.
+  Speech-to-text is not implemented.
 - The gRPC `ProtectAPI` server is a stub; no console has been observed dialling it.
 - Video-frame delivery is unsolved for the AI-Key path (on-demand clip fetch is
   the likely route; not implemented).

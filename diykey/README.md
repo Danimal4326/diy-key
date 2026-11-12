@@ -68,7 +68,7 @@ once real inference exists) not yet exercised.
   `.proto` contract. Kept running; not yet confirmed to be used by the
   live flow.
 - **`proto/`** — verbatim `.proto` files from the real `ui-uaibd` package.
-- **`tests/`** — 98 stdlib `unittest` cases covering the shared config/state layer,
+- **`tests/`** — 445 stdlib `unittest` cases covering the shared config/state layer,
   discovery TLVs, ucp4 framing/handlers, adopt persistence/certs, instance units and
   `run_all` wiring. `cd diykey && python3 -m unittest discover -s tests -v`.
 - **`stage5_faceid/`** — real face detection + embedding on the RK3588 NPU, standalone-tested
@@ -135,11 +135,12 @@ database `unifi-protect`, SSL required but not certificate-validated.
 need to stand up an empty, correctly-configured instance:
 
 ```bash
-sudo apt-get install -y postgresql postgresql-server-dev-15
+sudo apt-get install -y postgresql postgresql-server-dev-<major>
+# <major> is your release's PostgreSQL major (Debian 13: 17, Ubuntu 24.04: 16)
 # SSL is on by default via Debian's snakeoil cert -- sufficient, since the
 # controller doesn't validate it. Just open it up to the LAN:
-sudo sed -i "s/^#listen_addresses = 'localhost'/listen_addresses = '*'/" /etc/postgresql/15/main/postgresql.conf
-echo "hostssl unifi-protect unifi-protect <your-lan-cidr> scram-sha-256" | sudo tee -a /etc/postgresql/15/main/pg_hba.conf
+sudo sed -i "s/^#listen_addresses = 'localhost'/listen_addresses = '*'/" /etc/postgresql/<major>/main/postgresql.conf
+echo "hostssl unifi-protect unifi-protect <your-lan-cidr> scram-sha-256" | sudo tee -a /etc/postgresql/<major>/main/pg_hba.conf
 sudo -u postgres psql -c "CREATE ROLE \"unifi-protect\" WITH LOGIN PASSWORD 'unifi-protect' SUPERUSER;"
 sudo -u postgres psql -c "CREATE DATABASE \"unifi-protect\" OWNER \"unifi-protect\";"
 

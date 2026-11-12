@@ -24,8 +24,10 @@ macOS-specific.
 ## Dependencies
 
 ```bash
-sudo apt-get install -y python3-venv ffmpeg postgresql postgresql-server-dev-15
-# pgvector is not packaged for Debian/aarch64; build it (see diykey/README.md "PostgreSQL setup")
+sudo apt-get install -y python3-venv ffmpeg postgresql isc-dhcp-client
+# Also install postgresql-server-dev-<major> and postgresql-<major>-pgvector for your
+# release (Debian 13 is PG17, Ubuntu 24.04 is PG16). The DHCP client is only needed
+# when create runs without --ip.
 
 python3 -m venv ~/diykey-venv
 . ~/diykey-venv/bin/activate
@@ -42,9 +44,13 @@ Create the unit as before (identity is fixed at creation):
 
 ```bash
 cd diykey
-sudo python3 core/instance_manager.py create main --parent-iface <board-nic> \
+sudo "$HOME/diykey-venv/bin/python" core/instance_manager.py create main --parent-iface <board-nic> \
   --mac FC:EC:DA:00:00:01 --device-id <device-id> --state-dir instances/main
 ```
+
+The unit records the interpreter that runs `create`, so use the venv's python: plain
+`sudo python3` writes `/usr/bin/python3` into `ExecStart` and the unit fails on the first
+missing import.
 
 Then put the AI settings in the per-instance env file the unit reads:
 
@@ -63,7 +69,7 @@ DIYKEY_RAM_MODEL=/root/models/yolov9-s-320.onnx
 # DIYKEY_LPR=1           # licence plate recognition
 # DIYKEY_FACE_ENHANCE=1  # face enhancement
 # DIYKEY_FACE_ENHANCE_MODEL=/path/to/gfpgan_1.4.onnx
-# DIYKEY_VLM=mlx         # AI summary: mlx (macOS only) or transformers; off/0 or unset = off
+# DIYKEY_VLM=transformers  # AI summary on Linux (mlx is macOS only); needs pip install transformers
 # DIYKEY_VLM_MODEL=mlx-community/<SmolVLM2 or Qwen3-VL-2B repo>
 # DIYKEY_TASK_WORKERS=1
 # DIYKEY_TASK_QUEUE_MAX=200

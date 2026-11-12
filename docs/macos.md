@@ -14,7 +14,8 @@ AI Key with its own IP address, identity, state and PostgreSQL.
 | Second Stage Verification (`RequestAI`) | ✅ (offline-tested) | Box (0–1000 `[x,y,w,h]`) matched against the detector |
 | Find Anything (typed search) | ✅ | The AI Key's nl-search WebSocket; CLIP ViT-L/14 text/image embeddings |
 | Firmware update | Simulated | Real file stored, version pinned, nothing installed |
-| Face / LPR / face enhancement / speech-to-text / VLM descriptions | ❌ | See `BACKLOG.md` |
+| Face / LPR / face enhancement / VLM descriptions | ✅ (models needed) | See the settings table below; each is off until its `DIYKEY_*` key is set |
+| Speech-to-text | ❌ | Planned in `docs/future-backlog.md` |
 
 ## Prerequisites
 
@@ -36,7 +37,7 @@ From the repository root:
 ```bash
 python3 -m venv venv
 venv/bin/pip install -r diykey/requirements.txt     # includes onnxruntime, torch, open_clip
-venv/bin/python -m unittest discover -s diykey/tests   # 3 test_run_all errors are macOS-only
+venv/bin/python -m unittest discover -s diykey/tests   # 445 tests; model-dep tests skip if not installed
 ```
 
 ## Configure an instance
