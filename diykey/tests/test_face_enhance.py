@@ -2,6 +2,7 @@
 """face_enhance: shape/range contract and the firmware's return-the-original
 fallback (aikey-fw syswrapper.sh:1623-1628)."""
 import os
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -9,7 +10,13 @@ from unittest import mock
 import cv2
 import numpy as np
 
-from stage3_wss import face_enhance as fe
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_ROOT = os.path.dirname(_HERE)
+for p in (_ROOT, os.path.join(_ROOT, "stage3_wss")):
+    if p not in sys.path:
+        sys.path.insert(0, p)
+
+from stage3_wss import face_enhance as fe  # noqa: E402
 
 
 def _jpeg(w, h):
