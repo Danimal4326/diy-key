@@ -39,6 +39,13 @@ PLATE_MIN_PX = int(os.environ.get("DIYKEY_LPR_MIN_PX") or 60)
 CROP_MARGIN = 0.15
 TOP_K = 5
 
+# vehicleMeta says "vehicle"; legacy roiMeta names the body type (car/truck/...). Both are
+# vehicles for plate reading; person/animal are not.
+VEHICLE_OBJECT_TYPES = frozenset({
+    "vehicle", "car", "truck", "bus", "motorcycle", "motorbike", "bicycle", "bike", "van",
+    "suv", "pickup truck",
+})
+
 # --- vehicle type + colour (enrich.py:33-46, 123-192) ----------------------
 
 # COCO label -> Protect vehicleType; Protect knows car/suv/truck/van/bus/motorcycle/bike.
@@ -240,7 +247,7 @@ def build_lpr(camera_id, event_id, frames, vehicle_meta, start_ms=None, reader=N
         tid, coord, ts = roi.get("trackerId"), roi.get("coord"), m.get("ts")
         if tid is None or not coord or ts is None:
             continue
-        if (roi.get("objectType") or "vehicle") != "vehicle":
+        if str(roi.get("objectType") or "vehicle").lower() not in VEHICLE_OBJECT_TYPES:
             continue
         frame = frames.get(ts)
         if frame is None:

@@ -112,6 +112,22 @@ class BuildLprTest(unittest.TestCase):
                             reader=_reader([[("ABC123", 0.9, (0, 0, 30, 10))]]))
         self.assertIsNone(out)
 
+    def test_legacy_roi_vehicle_types_are_read(self):
+        """roiMeta names a vehicle by body type (car/truck/...), not always "vehicle"."""
+        for obj in ("vehicle", "car", "truck", "bus", "motorcycle", "bicycle"):
+            with self.subTest(obj=obj):
+                out = lpr.build_lpr("c", "e", {1: _frame()}, [_meta(1, 7, obj=obj)],
+                                    reader=_reader([[("ABC123", 0.9, BOX)]]))
+                self.assertIsNotNone(out)
+                self.assertEqual(out[0]["lprAttrs"]["7"]["matchedName"], "ABC123")
+
+    def test_other_object_types_are_not_read(self):
+        for obj in ("person", "animal", "dog", "crack"):
+            with self.subTest(obj=obj):
+                self.assertIsNone(lpr.build_lpr("c", "e", {1: _frame()},
+                                                [_meta(1, 7, obj=obj)],
+                                                reader=_reader([[("ABC123", 0.9, BOX)]])))
+
     def test_vehicle_type_from_label(self):
         m = _meta(1, 3)
         m["roi"]["label"] = "truck"
