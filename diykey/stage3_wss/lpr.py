@@ -1,0 +1,332 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+"""Licence-plate reads for an AI Key LPR result (Protect's lprInferenceSchema).
+
+Ported from pi-port/diy-port (same author, AGPL): diyport/enrich.py vehicle_attributes /
+dominant_color (vehicle colour + type) and Enricher.plates (fast-alpr: YOLOv9 plate detector
++ CCT OCR, both MIT). Here the input is the event's vehicle track metadata, not a live
+detection: per trackerId the best plate read over all of its frames is reported.
+
+Shape (Protect M/315148:59-71 lprAttrs record, :106-115 lprInferenceSchema; M =
+up/service-expanded/modules):
+  {cameraId, eventId, eventTracks: [{timestamp, descriptors: [plate]}], lprAttrs: {<vehicle trackerId>: {matchedName,
+   namesTopK, objectType, topKCandidate: [{name, confidence}], color?, vehicleType?}},
+   lprSnapshots: [snapshotSchema], inferMs, preProcessMs, status, timeElapsedMs}
+lprAttrs is keyed by the *vehicle* trackerId because Protect saves the plate onto the
+smart-detect object whose attributes.trackerId matches (M/785414:36-58).
+"""
+import importlib.util
+import logging
+import os
+import threading
+import time
+
+import numpy as np
+
+log = logging.getLogger("diykey.lpr")
+
+COORD_END = 1000  # roi coords are normalised 0..1000 (M/346308:76-80)
+
+# Snapshot trackerID = vehicle trackerId + this. Unknown whether the real firmware reuses the
+# vehicle id for the plate snapshot; the offset keeps the plate JPEG's multipart key from
+# colliding with a vehicle snapshot of the same tracker. lprAttrs stays on the vehicle id.
+PLATE_TRACKER_OFFSET = 200000
+
+# enrich.py:73-79. Plate-detector score floor; plates narrower than PLATE_MIN_PX (crop pixels)
+# aren't reported (pi-port live: every read under 75 px was wrong).
+PLATE_SCORE_THRESH = float(os.environ.get("DIYKEY_LPR_THRESH", "0.5"))
+PLATE_MIN_PX = int(os.environ.get("DIYKEY_LPR_MIN_PX") or 60)
+# enrich.py CROP_MARGIN 1.3 grows the box 15% each side (the frame can lag the box).
+CROP_MARGIN = 0.15
+TOP_K = 5
+
+# --- vehicle type + colour (enrich.py:33-46, 123-192) ----------------------
+
+# COCO label -> Protect vehicleType; Protect knows car/suv/truck/van/bus/motorcycle/bike.
+VEHICLE_TYPES = {
+    "car": "car", "truck": "truck", "bus": "bus", "motorbike": "motorcycle",
+    "motorcycle": "motorcycle", "bicycle": "bike",
+}
+# Protect's colour vocabulary; the classifier's "silver" has no Protect value.
+PROTECT_COLORS = {"red", "orange", "yellow", "green", "blue", "purple", "pink", "brown",
+                  "black", "white", "gray"}
+COLOR_ALIASES = {"silver": "gray"}
+
+
+def _rgb_to_hsv(rgb):
+    """uint8 Nx3 RGB -> float Nx3 HSV (h in degrees, s/v in 0-1)."""
+    c = rgb.astype(np.float32) / 255.0
+    r, g, b = c[:, 0], c[:, 1], c[:, 2]
+    v = c.max(axis=1)
+    mn = c.min(axis=1)
+    d = v - mn
+    s = np.where(v > 0, d / np.maximum(v, 1e-6), 0.0)
+    h = np.zeros_like(v)
+    nz = d > 1e-6
+    rm = nz & (v == r)
+    gm = nz & (v == g) & ~rm
+    bm = nz & ~rm & ~gm
+    h[rm] = (60 * ((g[rm] - b[rm]) / d[rm])) % 360
+    h[gm] = 60 * ((b[gm] - r[gm]) / d[gm]) + 120
+    h[bm] = 60 * ((r[bm] - g[bm]) / d[bm]) + 240
+    return np.stack([h, s, v], axis=1)
+
+
+def _pixel_colors(hsv):
+    h, s, v = hsv[:, 0], hsv[:, 1], hsv[:, 2]
+    names = np.full(len(h), "gray", dtype=object)
+    chroma = s >= 0.25
+    names[~chroma & (v >= 0.8)] = "white"
+    names[~chroma & (v >= 0.55) & (v < 0.8)] = "silver"
+    names[v < 0.2] = "black"
+    hue = chroma & (v >= 0.2)
+    bins = [(0, 15, "red"), (15, 40, "orange"), (40, 70, "yellow"), (70, 170, "green"),
+            (170, 260, "blue"), (260, 330, "purple"), (330, 361, "red")]
+    for lo, hi, name in bins:
+        names[hue & (h >= lo) & (h < hi)] = name
+    # dark, desaturated orange/red reads as brown
+    names[hue & (h < 40) & (v < 0.45)] = "brown"
+    return names
+
+
+def dominant_color(frame_rgb, coord):
+    """(color, confidence 0-100) for the central body of a box; None if the crop is empty."""
+    fh, fw = frame_rgb.shape[:2]
+    x, y, w, h = (float(v) for v in coord[:4])
+    # Central region: skips road/background at the edges and glass at the top.
+    x1 = int((x + 0.2 * w) * fw / COORD_END)
+    x2 = int((x + 0.8 * w) * fw / COORD_END)
+    y1 = int((y + 0.35 * h) * fh / COORD_END)
+    y2 = int((y + 0.85 * h) * fh / COORD_END)
+    crop = frame_rgb[max(0, y1):min(fh, y2), max(0, x1):min(fw, x2)]
+    if crop.size == 0:
+        return None
+    names = _pixel_colors(_rgb_to_hsv(crop.reshape(-1, 3)))
+    values, counts = np.unique(names, return_counts=True)
+    i = int(np.argmax(counts))
+    return str(values[i]), int(round(100 * counts[i] / counts.sum()))
+
+
+def vehicle_attributes(label, frame_rgb, coord):
+    """{vehicleType?, color?} as {val, confidence}, or None. Confidence is 0-100 as in
+    pi-port's descriptor attributes (scale there came from the Protect decompile)."""
+    attrs = {}
+    vtype = VEHICLE_TYPES.get((label or "").strip())
+    if vtype:
+        attrs["vehicleType"] = {"val": vtype, "confidence": 70}
+    if frame_rgb is not None:
+        color = dominant_color(frame_rgb, coord)
+        if color:
+            name = COLOR_ALIASES.get(color[0], color[0])
+            if name in PROTECT_COLORS:
+                attrs["color"] = {"val": name, "confidence": color[1]}
+    return attrs or None
+
+
+# --- fast-alpr reader (enrich.py:241-299) ----------------------------------
+
+_lock = threading.Lock()
+_alpr = None
+_unavailable_logged = False
+
+
+def _have(mod):
+    return importlib.util.find_spec(mod) is not None
+
+
+def lpr_available():
+    return _have("fast_alpr") and _have("cv2")
+
+
+def _alpr_reader(crop):
+    """crop (BGR) -> [(text, confidence 0-1, (x1, y1, x2, y2) crop px)]. Lazy-loads fast-alpr
+    once; the lock also serialises predict(), which isn't known to be thread-safe."""
+    global _alpr
+    out = []
+    with _lock:
+        if _alpr is None:
+            from fast_alpr import ALPR
+            # Both on CPU: the CCT OCR graph and the YOLOv9 dynamic NMS output don't work
+            # under Core ML (enrich.py:244-247).
+            _alpr = ALPR(detector_providers=["CPUExecutionProvider"],
+                         ocr_providers=["CPUExecutionProvider"])
+        results = _alpr.predict(crop)
+    for r in results:
+        if r.detection.confidence < PLATE_SCORE_THRESH or not r.ocr or not r.ocr.text:
+            continue
+        conf = r.ocr.confidence
+        conf = float(np.mean(conf)) if isinstance(conf, (list, tuple, np.ndarray)) else float(conf)
+        b = r.detection.bounding_box
+        out.append((r.ocr.text, min(float(r.detection.confidence), conf),
+                    (int(b.x1), int(b.y1), int(b.x2), int(b.y2))))
+    return out
+
+
+def _crop(img, coord, margin):
+    try:
+        from ram_tagger import crop_box
+    except ImportError:
+        crop_box = None
+    if crop_box is not None:
+        return crop_box(img, coord, margin=margin)
+    h, w = img.shape[:2]
+    x, y, bw, bh = (float(v) * s / COORD_END for v, s in zip(coord[:4], (w, h, w, h)))
+    x0, y0 = max(0, int(x - bw * margin)), max(0, int(y - bh * margin))
+    x1, y1 = min(w, int(x + bw * (1 + margin))), min(h, int(y + bh * (1 + margin)))
+    return img[y0:y1, x0:x1] if x1 - x0 >= 8 and y1 - y0 >= 8 else None
+
+
+def _crop_origin(img, coord, margin):
+    """Top-left (x0, y0) frame pixel of _crop's fallback crop, to map the plate bbox (crop px)
+    back into frame px for eventTracks. ram_tagger.crop_box is assumed to use the same
+    margin-grown clamp; if it ever differs the track box is off by the margin only."""
+    h, w = img.shape[:2]
+    x, y, bw, bh = (float(v) * s / COORD_END for v, s in zip(coord[:4], (w, h, w, h)))
+    return max(0, int(x - bw * margin)), max(0, int(y - bh * margin))
+
+
+def _norm_box(x1, y1, x2, y2, fw, fh):
+    """Frame-px box -> [x, y, w, h] in 0..1000 (the descriptor coord, M/116837:30-31,
+    smartDetectTrackPayload.coord "normalized to 0-1000 of the frame")."""
+    x1, y1 = max(0, x1), max(0, y1)
+    x2, y2 = min(fw, x2), min(fh, y2)
+    return [round(x1 * COORD_END / fw, 1), round(y1 * COORD_END / fh, 1),
+            round((x2 - x1) * COORD_END / fw, 1), round((y2 - y1) * COORD_END / fh, 1)]
+
+
+def _jpeg(img):
+    try:
+        import cv2
+        ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 90])
+        return buf.tobytes() if ok else b""
+    except Exception:
+        log.debug("plate JPEG encode failed", exc_info=True)
+        return b""
+
+
+def plate_descriptor(snap_id, text, conf, coord):
+    """One lprInferenceSchema eventTracks descriptor (all fields required, M/315148:26-38;
+    Protect's smartDetectObjectDescriptorAjvParse also wants coord = 4 finite numbers and
+    zones/lines = number arrays, M/116837:33-49). objectType licensePlate with the plate
+    text as name, as firmware lprSnapshots name the object; confidenceLevel 0-100.
+    Protect's face linker (M/321055) matches eventTracks by timestamp to personMeta ts, so
+    the track timestamp is the frame ts as given, not wall time."""
+    return {"boxColor": "cyan", "confidenceLevel": int(round(100 * conf)), "coord": coord,
+            "coord3d": [], "lines": [], "name": text, "objectType": "licensePlate",
+            "stationary": False, "tag": "", "trackerID": snap_id, "zones": []}
+
+
+def build_lpr(camera_id, event_id, frames, vehicle_meta, start_ms=None, reader=None):
+    """(lpr_json, jpegs) for an event's vehicle tracks, or None when no plate was read.
+
+    frames: {ts: BGR ndarray}. vehicle_meta: [{ts, roi: {coord: [x, y, w, h] 0..1000,
+    objectType, trackerId}}] (M/346308:76-80, 96: roi is a single object). reader: optional
+    callable(crop) -> [(text, confidence, bbox)] replacing fast-alpr (tests).
+    jpegs: {str(snapshot trackerID): plate crop JPEG}, snapshot id = trackerId + offset.
+    """
+    global _unavailable_logged
+    t0 = time.monotonic()
+    if reader is None:
+        if not lpr_available():
+            if not _unavailable_logged:
+                log.warning("fast-alpr/opencv not installed -- licence plates disabled")
+                _unavailable_logged = True
+            return None
+        reader = _alpr_reader
+    pre_s = infer_s = 0.0
+    best = {}    # trackerId -> dict(text, conf, ts, coord, frame, plate, label)
+    cands = {}   # trackerId -> {text: best confidence}
+    for m in vehicle_meta or ():
+        roi = m.get("roi") or {}
+        tid, coord, ts = roi.get("trackerId"), roi.get("coord"), m.get("ts")
+        if tid is None or not coord or ts is None:
+            continue
+        if (roi.get("objectType") or "vehicle") != "vehicle":
+            continue
+        frame = frames.get(ts)
+        if frame is None:
+            continue
+        p0 = time.monotonic()
+        crop = _crop(frame, coord, CROP_MARGIN)
+        pre_s += time.monotonic() - p0
+        if crop is None or crop.shape[0] < 16 or crop.shape[1] < 16:
+            continue
+        i0 = time.monotonic()
+        try:
+            reads = reader(crop) or []
+        except Exception:
+            log.exception("plate read failed on tracker %s", tid)
+            reads = []
+        infer_s += time.monotonic() - i0
+        tid = int(tid)
+        for text, conf, bbox in reads:
+            text = (text or "").replace("_", "").strip().upper()
+            if len(text) < 3:
+                continue
+            x1, y1, x2, y2 = (int(v) for v in bbox)
+            if x2 - x1 < PLATE_MIN_PX:
+                log.debug("plate %r skipped: %d px wide, under %d px", text, x2 - x1,
+                          PLATE_MIN_PX)
+                continue
+            conf = float(conf)
+            c = cands.setdefault(tid, {})
+            c[text] = max(conf, c.get(text, 0.0))
+            if tid not in best or conf > best[tid]["conf"]:
+                ox, oy = _crop_origin(frame, coord, CROP_MARGIN)
+                best[tid] = {"text": text, "conf": conf, "ts": ts, "coord": coord,
+                             "frame": frame, "box_px": (ox + x1, oy + y1, ox + x2, oy + y2), "label": roi.get("label") or m.get("label"),
+                             "plate": crop[max(0, y1):y2, max(0, x1):x2]}
+    if not best:
+        return None
+
+    attrs, snaps, jpegs, tracks = {}, [], {}, []
+    for tid, b in best.items():
+        top = sorted(cands[tid].items(), key=lambda kv: -kv[1])[:TOP_K]
+        entry = {
+            "matchedName": b["text"],
+            "namesTopK": [t for t, _ in top],
+            "objectType": "vehicle",
+            # 0-100, same as color/vehicleType: every Protect attribute confidence is a
+            # percentage (smartDetectTrackPayload.confidence "(0-100)" M/116837:126; sample
+            # attributes color 95 / vehicleType 88 M/116837:157-158; descriptor
+            # confidenceLevel is the same scale). topKCandidate sits in the same attribute
+            # family (482984:31 {name, confidence}) and 785414 only copies it, so a 0..1
+            # fast-alpr score would read as ~1% there. No Protect code compares it.
+            "topKCandidate": [{"name": t, "confidence": round(100 * c, 1)} for t, c in top],
+        }
+        va = vehicle_attributes(b["label"], b["frame"][..., ::-1], b["coord"])
+        if va:
+            entry.update(va)
+        attrs[str(tid)] = entry
+        snap_id = tid + PLATE_TRACKER_OFFSET
+        wall = int(start_ms) + int(b["ts"]) if start_ms is not None else int(b["ts"])
+        snaps.append({
+            "clockBestMonotonic": int(b["ts"]),
+            "clockBestWall": wall,
+            "smartDetectHeatmap": "",
+            # smartDetectSnapshot is the firmware's LOCAL file path; syswrapper only tests it with `-f`
+            # and uploads it as multipart part named str(trackerID) (SW:4019-4026), so Protect never
+            # sees the path (M/337954:92 only copies it into the parsed snapshot). Mirror the
+            # firmware's /tmp/<camera>_<id>.jpg. Name stays "": Protect uses it as the object's
+            # display name (M/482984:245) and, on a vehicle snapshot, as the plate flag (M/204401:43).
+            # Heatmap: nothing in SW or the save code reads it; "" until a capture shows otherwise.
+            "smartDetectSnapshot": f"/tmp/{camera_id}_{snap_id}.jpg",
+            "smartDetectSnapshotName": "",
+            "smartDetectSnapshotType": "licensePlate",
+            "trackerID": snap_id,
+        })
+        fh, fw = b["frame"].shape[:2]
+        tracks.append({"timestamp": int(b["ts"]), "descriptors": [plate_descriptor(
+            snap_id, b["text"], b["conf"], _norm_box(*b["box_px"], fw, fh))]})
+        jpegs[str(snap_id)] = _jpeg(b["plate"]) if b["plate"].size else b""
+    lpr_json = {
+        "cameraId": camera_id,
+        "eventId": event_id,
+        "eventTracks": tracks,
+        "lprAttrs": attrs,
+        "lprSnapshots": snaps,
+        "inferMs": int(round(infer_s * 1000)),
+        "preProcessMs": int(round(pre_s * 1000)),
+        "status": "success",
+        "timeElapsedMs": int(round((time.monotonic() - t0) * 1000)),
+    }
+    return lpr_json, jpegs

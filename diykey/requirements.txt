@@ -9,6 +9,8 @@ numpy>=1.26
 opencv-python-headless>=4.9
 # RAM tagging (stage3_wss/ram_tagger.py), with a COCO ONNX model in DIYKEY_RAM_MODEL.
 onnxruntime>=1.18
+# Plate reading (stage3_wss/lpr.py), only with DIYKEY_LPR=1.
+fast-alpr
 
 # rknn-toolkit-lite2 (stage5_faceid NPU inference) is not on PyPI: install the
 # Rockchip wheel matching librknnrt 2.3.2 from rknn-toolkit2's rknn-toolkit-lite2
@@ -16,3 +18,5 @@ onnxruntime>=1.18
 # Find Anything embeddings (stage3_wss/clip_embed.py), only with DIYKEY_CLIP=1.
 torch>=2.4
 open_clip_torch>=2.24
+# NeXT AI Summary (stage3_wss/vlm_describe.py), only with DIYKEY_VLM=mlx (Apple Silicon); tested with:
+# mlx-vlm==0.7.12

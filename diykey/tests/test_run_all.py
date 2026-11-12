@@ -25,10 +25,14 @@ class TestStageWiring(unittest.TestCase):
         proc.pid = 1234
         proc.poll.return_value = 1  # triggers one supervised-exit pass
         argv = ["--state-dir", self.d, *argv]  # never touch the real stage1_http/
+        # Tests without --mac derive one from the interface. On macOS that runs networksetup
+        # through subprocess.run, which would hit the patched Popen below and crash
+        # unpacking its MagicMock communicate(); stub the interface MAC instead.
         with mock.patch.object(run_all.os, "geteuid", return_value=0), \
                 mock.patch.object(run_all.config, "load_config_and_logging",
                                   return_value=dict(run_all.config.DEFAULTS)), \
                 mock.patch.object(run_all.config, "resolve_ip", return_value="10.9.9.9"), \
+                mock.patch.object(run_all.config, "_iface_mac", return_value="AABBCCDDEEFF"), \
                 mock.patch.object(run_all.subprocess, "Popen", return_value=proc) as popen, \
                 mock.patch.object(run_all.time, "sleep"), \
                 mock.patch.object(run_all.sys, "argv", ["run_all.py", *argv]):
@@ -55,6 +59,12 @@ class TestStageWiring(unittest.TestCase):
         self.assertNotIn("--state-dir", by_name["server.py"])
         self.assertIn("--bind-ip", by_name["model_server.py"])
         self.assertNotIn("--state-dir", by_name["model_server.py"])
+
+    def test_mac_derived_from_interface_without_flag(self):
+        _, cmds = self._run(["--iface", "eth0", "--skip-grpc"])
+        wss = [c for c in cmds if os.path.basename(c[1]) == "ucp4_client.py"][0]
+        mac = wss[wss.index("--mac") + 1].replace(":", "").upper()
+        self.assertEqual(mac, run_all.config.UBNT_OUI + "DDEEFF")
 
     def test_skip_grpc(self):
         _, cmds = self._run(["--iface", "eth0", "--skip-grpc"])
