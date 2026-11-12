@@ -423,10 +423,11 @@ def tag_crop(tagger, img_bgr, hint, frame_tags=None):
 
 def crop_tags(tagger, img_bgr, hint, frame_tags=None):
     """(tag_crop's tags, claimed_type_supported for this crop)."""
-    object_type = normalise_object_type(hint.get("objectType")
-                                       or (hint.get("attributes") or {}).get("objectType"))
-    family = FAMILY.get(object_type)
     attrs = hint.get("attributes") or {}
+    object_type = normalise_object_type(hint.get("objectType") or attrs.get("objectType"))
+    if not object_type and (attrs.get("vehicleType") or {}).get("val"):
+        object_type = "vehicle"  # the camera named the body type; the class is implicit
+    family = FAMILY.get(object_type)
     family_tags = {COCO_TO_RAM.get(lbl, lbl) for lbl in family or ()}
     found = {}
     plus = getattr(tagger, "plus", None)
@@ -534,30 +535,38 @@ def thumbnail_tags(tagger, objects, frame_tags=None):
             continue
         _prof_add("crops", None)
         hint = o.get("hint") or {}
+        attrs = hint.get("attributes") or {}
         tags, supported = crop_tags(tagger, o["img"], hint, frame_tags)
         entry = {"trackerID": int(o["trackerID"]), "keyMomentMs": int(o["keyMomentMs"]),
                  "tags": tags}
-        obj_type = str(hint.get("objectType") or (hint.get("attributes") or {})
-                       .get("objectType") or "").lower()
-        t0 = time.monotonic()
-        raw = clip_embed.image_embed(o["img"])
-        _prof_add("clipemb", t0)
-        veto = clip_veto_threshold()
-        if obj_type == "animal" and raw and veto > 0:
+        obj_type = normalise_object_type(hint.get("objectType") or attrs.get("objectType"))
+        if not obj_type and (attrs.get("vehicleType") or {}).get("val"):
+            obj_type = "vehicle"
+        raw = emb = None
+        try:
             t0 = time.monotonic()
-            p = not_animal_prob(raw)
-            _prof_add("veto", t0)
-            if p is not None and p >= veto:
-                animal_words = SPECIES | {COCO_TO_RAM.get(lbl, lbl) for lbl in FAMILY["animal"]} \
-                    | {"animal"}
-                dropped = [t["tag"] for t in entry["tags"] if t["tag"] in animal_words]
-                entry["tags"] = [t for t in entry["tags"] if t["tag"] not in animal_words]
-                supported = False
-                log.info("tracker %s: CLIP says not an animal (%.2f >= DIYKEY_CLIP_VETO=%.2f); "
-                         "dropped %s", entry["trackerID"], p, veto, ", ".join(dropped) or "nothing")
-        # Blend before the umbrella tag: DIYKEY_CLIP_TAG_BLEND was tuned on "a photo of car,
-        # night", not "car, night, vehicle".
-        emb = clip_embed.blend(raw, [t["tag"] for t in entry["tags"]])
+            raw = clip_embed.image_embed(o["img"])
+            _prof_add("clipemb", t0)
+            veto = clip_veto_threshold()
+            if obj_type == "animal" and raw and veto > 0:
+                t0 = time.monotonic()
+                p = not_animal_prob(raw)
+                _prof_add("veto", t0)
+                if p is not None and p >= veto:
+                    animal_words = (SPECIES
+                                    | {COCO_TO_RAM.get(lbl, lbl) for lbl in FAMILY["animal"]}
+                                    | {"animal"})
+                    dropped = [t["tag"] for t in entry["tags"] if t["tag"] in animal_words]
+                    entry["tags"] = [t for t in entry["tags"] if t["tag"] not in animal_words]
+                    supported = False
+                    log.info("tracker %s: CLIP says not an animal (%.2f >= DIYKEY_CLIP_VETO=%.2f); "
+                             "dropped %s", entry["trackerID"], p, veto,
+                             ", ".join(dropped) or "nothing")
+            # Blend before the umbrella tag: DIYKEY_CLIP_TAG_BLEND was tuned on "a photo of car,
+            # night", not "car, night, vehicle".
+            emb = clip_embed.blend(raw, [t["tag"] for t in entry["tags"]])
+        except Exception as e:  # noqa: BLE001 -- a model failure must not lose the tags
+            log.warning("tracker %s: CLIP failed (%r); no embedding", entry["trackerID"], e)
         if emb:
             entry["imgEmbed"] = emb
         reid = None

@@ -245,6 +245,29 @@ class PlusMergeTest(unittest.TestCase):
         got = {t["tag"] for t in ram_tagger.tag_crop(FakeTagger(), self.img, hint)}
         self.assertIn("red", got)
 
+    def test_camera_vehicle_type_implies_vehicle_without_object_type(self):
+        hint = {"attributes": {"vehicleType": {"val": "suv", "confidence": 80},
+                               "color": {"val": "red", "confidence": 95}}}
+        got = {t["tag"] for t in ram_tagger.tag_crop(PlusTagger(self.plus), self.img, hint)}
+        self.assertIn("suv", got)
+        self.assertIn("red", got)
+        self.assertNotIn("person", got)
+
+    def test_legacy_body_type_gets_the_vehicle_umbrella(self):
+        thumb, = ram_tagger.thumbnail_tags(
+            PlusTagger(self.plus),
+            [{"trackerID": 4, "keyMomentMs": 1, "img": self.img,
+              "hint": {"objectType": "car", "confidence": 80}}], {})
+        self.assertIn("vehicle", [t["tag"] for t in thumb["tags"]])
+
+    def test_camera_vehicle_type_gets_the_umbrella_without_object_type(self):
+        thumb, = ram_tagger.thumbnail_tags(
+            PlusTagger(self.plus),
+            [{"trackerID": 4, "keyMomentMs": 1, "img": self.img,
+              "hint": {"confidence": 80,
+                       "attributes": {"vehicleType": {"val": "suv", "confidence": 80}}}}], {})
+        self.assertIn("vehicle", [t["tag"] for t in thumb["tags"]])
+
     def test_vehicle_umbrella_stays_when_the_camera_typed_it(self):
         # RAM++ sees no vehicle word here (sedan is below its threshold), COCO only person/car is
         # dropped for the camera's type: the camera's own classification still backs "vehicle".
@@ -477,6 +500,18 @@ class ClipVetoTest(unittest.TestCase):
         self.assertNotIn("animal", self.thumb(0.55)[0])
         os.environ["DIYKEY_CLIP_VETO"] = "0"
         self.assertIn("animal", self.thumb(0.99)[0])
+
+    def test_legacy_animal_type_is_vetoed(self):
+        tags, _ = self.thumb(0.99, hint={"objectType": "dog", "confidence": 91})
+        for t in ("animal", "dog", "cat", "bear"):
+            self.assertNotIn(t, tags)
+
+    def test_clip_failure_keeps_the_tags(self):
+        with unittest.mock.patch("clip_embed.image_embed",
+                                 side_effect=RuntimeError("mps oom")):
+            tags, thumb = self.thumb(0.99)
+        self.assertIn("animal", tags)
+        self.assertNotIn("imgEmbed", thumb)
 
     def test_only_claimed_animals_are_checked(self):
         tags, _ = self.thumb(0.99, hint={"objectType": "person", "confidence": 80},
