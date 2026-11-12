@@ -64,11 +64,7 @@ def _load_registry():
 
 
 def _save_registry(reg):
-    os.makedirs(INSTANCES_DIR, exist_ok=True)
-    tmp = REGISTRY_PATH + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(reg, f, indent=2)
-    os.replace(tmp, REGISTRY_PATH)
+    config.atomic_write_json(REGISTRY_PATH, reg)
 
 
 def _iface_exists(iface):

@@ -21,7 +21,7 @@ import ssl
 import subprocess
 import sys
 import time
-import traceback
+
 
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 _PROJECT_DIR = os.path.dirname(_THIS_DIR)
@@ -188,7 +188,7 @@ class Server(http.server.ThreadingHTTPServer):
         try:
             self.finish_request(tls, client_address)
         except Exception:
-            traceback.print_exc()
+            log.exception("request handling failed")
             self.handle_error(tls, client_address)
         finally:
             self.shutdown_request(tls)
