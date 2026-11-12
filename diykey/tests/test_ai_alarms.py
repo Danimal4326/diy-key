@@ -286,3 +286,7 @@ class TestAnimalObjectType(_VocabCase):
 
     def test_non_animal_unchanged(self):
         self.assertIsNone(nl_search._object_type("boxes"))
+
+
+if __name__ == "__main__":
+    unittest.main()

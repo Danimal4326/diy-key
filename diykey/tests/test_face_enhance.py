@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """face_enhance: shape/range contract and the firmware's return-the-original
 fallback (aikey-fw syswrapper.sh:1623-1628)."""
+import importlib.util
 import os
 import sys
 import tempfile
@@ -17,6 +18,8 @@ for p in (_ROOT, os.path.join(_ROOT, "stage3_wss")):
         sys.path.insert(0, p)
 
 from stage3_wss import face_enhance as fe  # noqa: E402
+
+HAS_ORT = importlib.util.find_spec("onnxruntime") is not None
 
 
 def _jpeg(w, h):
@@ -100,6 +103,7 @@ class FaceEnhanceTest(unittest.TestCase):
         self.assertIs(fe.enhance(src, session=FakeSession(fail=True)), src)
         self.assertIn("run", fe._logged)
 
+    @unittest.skipUnless(HAS_ORT, "onnxruntime not installed")
     def test_failed_load_retries_when_model_file_changes(self):
         src = _jpeg(80, 90)
         with tempfile.TemporaryDirectory() as d:
@@ -175,6 +179,7 @@ class ProviderChoiceTest(unittest.TestCase):
         self.assertEqual(self._provs("ane"), self.BOTH)
         self.assertIn("provider", fe._logged)
 
+    @unittest.skipUnless(HAS_ORT, "onnxruntime not installed")
     def test_load_passes_the_choice_to_onnxruntime(self):
         with tempfile.TemporaryDirectory() as d:
             path = os.path.join(d, "gfpgan.onnx")

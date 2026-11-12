@@ -3,12 +3,19 @@
 similarity by <= 0.28 points on 44 Driveway crops x 15 queries, +889 MB vs +2.5 GB FP32), and
 Protect's similarity mapping."""
 import os
+import sys
 import unittest
 from unittest import mock
 
 import numpy as np
 
-from stage3_wss import clip_embed as ce
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_ROOT = os.path.dirname(_HERE)
+for p in (_ROOT, os.path.join(_ROOT, "stage3_wss")):
+    if p not in sys.path:
+        sys.path.insert(0, p)
+
+from stage3_wss import clip_embed as ce  # noqa: E402
 
 
 class Fp16ToggleTest(unittest.TestCase):
@@ -38,6 +45,19 @@ class Fp16ToggleTest(unittest.TestCase):
                              os.path.expanduser("~/.diy-key/models/" + ce.FP16_FILE))
         with self._env(DIYKEY_CLIP_FP16_WEIGHTS="~/w/clip16.safetensors"):
             self.assertEqual(ce.fp16_weights_path(), os.path.expanduser("~/w/clip16.safetensors"))
+
+
+class EnabledTest(unittest.TestCase):
+    def _env(self, value):
+        return mock.patch.dict(os.environ, {"DIYKEY_CLIP": value}, clear=False)
+
+    def test_enabled_accepts_the_same_truthy_forms_as_the_feature_flag(self):
+        for value in ("1", "true", "yes", "on", "TRUE"):
+            with self._env(value):
+                self.assertTrue(ce.enabled(), value)
+        for value in ("0", "false", "no", "off", ""):
+            with self._env(value):
+                self.assertFalse(ce.enabled(), value)
 
 
 class SimilarityTest(unittest.TestCase):

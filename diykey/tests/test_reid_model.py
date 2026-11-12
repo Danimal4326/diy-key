@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """reid_model: raw, zero-padded OSNet vectors; reidEmbed on people only; segment-video."""
+import importlib.util
 import os
 import sys
 import unittest
@@ -17,6 +18,7 @@ import reid_model  # noqa: E402
 import ucp4_client  # noqa: E402
 
 ENV = {"DIYKEY_REID_MODEL": "/m.pth"}
+HAS_TORCH = importlib.util.find_spec("torch") is not None
 
 
 class EmbedTest(unittest.TestCase):
@@ -54,6 +56,7 @@ class EmbedTest(unittest.TestCase):
                 self.assertLogs("diykey.reid", "WARNING"):
             self.assertIsNone(reid_model.embed(img))
 
+    @unittest.skipUnless(HAS_TORCH, "torch not installed")
     def test_padded_to_protect_width_and_not_normalised(self):
         import torch
         model = reid_model._build().eval()

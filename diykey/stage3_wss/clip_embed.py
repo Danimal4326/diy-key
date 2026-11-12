@@ -42,7 +42,7 @@ FP16_FILE = "clip-ViT-L-14-quickgelu-openai-fp16.safetensors"
 
 
 def enabled():
-    return os.environ.get("DIYKEY_CLIP", "0") == "1"
+    return os.environ.get("DIYKEY_CLIP", "0").strip().lower() in ("1", "true", "yes", "on")
 
 
 def fp16_wanted(device):
@@ -101,7 +101,12 @@ def _load():
             try:
                 import open_clip
                 import torch
-                device = "mps" if torch.backends.mps.is_available() else "cpu"
+                if torch.backends.mps.is_available():
+                    device = "mps"
+                elif torch.cuda.is_available():
+                    device = "cuda"
+                else:
+                    device = "cpu"
                 fp16 = fp16_wanted(device)
                 if fp16:
                     model, preprocess = _load_fp16(open_clip, torch, device)
