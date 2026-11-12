@@ -770,7 +770,8 @@ def handle_action(head, body, device_info):
     elif action == "RequestAI":
         # targetUri (":7788/v1/models/<model>/inference") means "call your own
         # local gateway": there is no console callback into :7788.
-        _submit_task("RequestAI", _post_request_ai_result, (device_info["mac_nosep"], body))
+        _submit_task("RequestAI", _post_request_ai_result,
+                     (device_info["console_host"], device_info["mac_nosep"], body))
     elif action in ("factoryReset", "restoreDefault"):
         _factory_reset(action)
     elif action in ACK_ONLY_ACTIONS:
@@ -794,21 +795,21 @@ def _second_verifier_result(params: dict) -> dict:
     _second_verifier_result. Schema confirmed from the real
     models/second_verifier.py; values stay placeholders until real inference."""
     rows = []
-    for entry in params.get("thumbnailMeta") or []:
+    for entry in _flatten_meta(params.get("thumbnailMeta")):
         ts = entry.get("ts")
-        for roi in entry.get("roi", []):
-            object_type = str(roi.get("objectType") or "").lower()
-            rows.append({
-                "thumbnailMs": ts,
-                "trackerID": int(roi.get("trackerID", roi.get("trackerId", -1))),  # schema: number
-                "objectType": object_type,
-                "isValidDetection": True,
-                "detectedAs": object_type,
-                "modelRunStatus": "skipped",
-                "iouScore": None,
-                "detectionConfidence": 0.0,
-                "detectionConfidenceList": [],
-            })
+        roi = entry["roi"]
+        object_type = str(roi.get("objectType") or "").lower()
+        rows.append({
+            "thumbnailMs": ts,
+            "trackerID": int(roi.get("trackerID", roi.get("trackerId", -1))),  # schema: number
+            "objectType": object_type,
+            "isValidDetection": True,
+            "detectedAs": object_type,
+            "modelRunStatus": "skipped",
+            "iouScore": None,
+            "detectionConfidence": 0.0,
+            "detectionConfidenceList": [],
+        })
     return {
         "cameraId": params.get("camera", ""),
         "eventId": params.get("event", ""),
@@ -829,7 +830,7 @@ def _callback_headers(mac_nosep):
     }
 
 
-def _verify_from_clip(params, mac_nosep):
+def _verify_from_clip(params, mac_nosep, console_host):
     """Second Stage Verification on the event's own frames: fetch reqUrl (the export around
     the thumbnails) as MP4, grab each thumbnail time, classify each box. None when there is
     no tagger model or the clip/frames can't be had, so the placeholder goes back instead."""
@@ -845,9 +846,10 @@ def _verify_from_clip(params, mac_nosep):
     start = dict(parse_qsl(urlsplit(req_url).query)).get("start")
     start = int(start) if start and start.isdigit() else moments[0]
     clips_dir = os.path.join(STATE_DIR, "clips")
-    clip = clip_fetch.fetch_clip(clip_fetch.mp4_url("", CONSOLE_INTERNAL_API_PORT, req_url),
-                                 _callback_headers(mac_nosep), (CERT_PATH, KEY_PATH), clips_dir,
-                                 f"{params.get('event') or 'event'}-verify")
+    clip = clip_fetch.fetch_clip(
+        clip_fetch.mp4_url(console_host, CONSOLE_INTERNAL_API_PORT, req_url),
+        _callback_headers(mac_nosep), (CERT_PATH, KEY_PATH), clips_dir,
+        f"{params.get('event') or 'event'}-verify")
     if not clip:
         return None
     frames = clip_fetch.extract_frames(clip, start, moments)
@@ -865,7 +867,7 @@ def _verify_from_clip(params, mac_nosep):
     return result
 
 
-def _post_request_ai_result(mac_nosep, task_body):
+def _post_request_ai_result(console_host, mac_nosep, task_body):
     target_uri = task_body.get("targetUri", "")
     res_url = task_body.get("resUrl")
     payload = task_body.get("payload", {})
@@ -878,7 +880,8 @@ def _post_request_ai_result(mac_nosep, task_body):
         model_name = m.group(1)
 
     if model_name == "second_verifier_mlabel":
-        result = _verify_from_clip(params, mac_nosep) or _second_verifier_result(params)
+        result = _verify_from_clip(params, mac_nosep, console_host) \
+            or _second_verifier_result(params)
     else:
         log.warning("RequestAI for unhandled model %r, sending empty result", model_name)
         result = {}
@@ -893,12 +896,13 @@ def _post_request_ai_result(mac_nosep, task_body):
     if not res_url:
         log.warning("RequestAI task had no resUrl, nothing to post (result=%s)", response_body)
         return
+    url = _abs_url(console_host, res_url)
     try:
-        resp = requests.post(res_url, headers=_callback_headers(mac_nosep), json=response_body,
+        resp = requests.post(url, headers=_callback_headers(mac_nosep), json=response_body,
                              cert=(CERT_PATH, KEY_PATH), verify=False, timeout=15)
-        log.info("POST %s -> %s: %s", res_url, resp.status_code, resp.text[:2000])
+        log.info("POST %s -> %s: %s", url, resp.status_code, resp.text[:2000])
     except requests.RequestException as e:
-        log.warning("POST %s failed: %r", res_url, e)
+        log.warning("POST %s failed: %r", url, e)
 
 
 def _handle_fast_reverification(console_host, mac_nosep, body):
@@ -1912,15 +1916,15 @@ def _video_objects(body, frames):
     """Tracked objects of a video RAM task, cropped out of the frame at their thumbnail time."""
     import cv2
     objects = []
-    for entry in body.get("thumbnailMeta") or []:
+    for entry in _flatten_meta(body.get("thumbnailMeta")):
         ts = entry.get("ts")
         img = cv2.imread(frames[ts]) if ts in frames else None
-        for roi in entry.get("roi") or []:
-            tracker = roi.get("trackerID", roi.get("trackerId"))
-            if img is None or tracker is None or not roi.get("coord"):
-                continue
-            objects.append({"trackerID": tracker, "keyMomentMs": ts,
-                            "img": ram_tagger.crop_box(img, roi["coord"]), "hint": roi})
+        roi = entry["roi"]
+        tracker = roi.get("trackerID", roi.get("trackerId"))
+        if img is None or tracker is None or not roi.get("coord"):
+            continue
+        objects.append({"trackerID": tracker, "keyMomentMs": ts,
+                        "img": ram_tagger.crop_box(img, roi["coord"]), "hint": roi})
     return objects
 
 
@@ -2208,7 +2212,7 @@ def advanced_alarm_gaps(env=None):
     built-in list is a safe subset) and the nl-search socket (NL_PARSE)."""
     env = os.environ if env is None else env
     missing = []
-    if (env.get("DIYKEY_CLIP") or "0") != "1":
+    if not _truthy(env.get("DIYKEY_CLIP")):
         missing.append("DIYKEY_CLIP=1")
     if not (env.get("DIYKEY_RAM_MODEL") or "").strip():
         missing.append("DIYKEY_RAM_MODEL")

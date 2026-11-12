@@ -38,6 +38,14 @@ def protect_type(label):
     return None
 
 
+def _rois(entry):
+    """roi is one object in Protect's schema but a list on some paths."""
+    roi = entry.get("roi")
+    if isinstance(roi, dict):
+        return [roi]
+    return [r for r in roi or () if isinstance(r, dict)]
+
+
 def box_px(coord, width, height):
     """[x, y, w, h] in 0..1000 -> pixel (x, y, w, h)."""
     x, y, w, h = (float(v) for v in coord[:4])
@@ -96,7 +104,7 @@ def verify(tagger, frames, params):
     for entry in params.get("thumbnailMeta") or []:
         ts = entry.get("ts")
         img = cv2.imread(frames[ts]) if ts in frames else None
-        for roi in entry.get("roi") or []:
+        for roi in _rois(entry):
             claimed = str(roi.get("objectType") or (roi.get("attributes") or {}).get("objectType")
                           or "").lower()
             tracker = roi.get("trackerID", roi.get("trackerId"))

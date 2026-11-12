@@ -668,10 +668,6 @@ class TestSplitHostPort(unittest.TestCase):
         self.assertEqual(ucp4_client._split_host_port("10.0.0.5"), ("10.0.0.5", 7442))
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class _RecognizeTest(_StateDirTest):
     """recognizeKeyFrames with the clip fetch, ffmpeg and models mocked out."""
     START = 1_760_000_000_000
@@ -1796,3 +1792,64 @@ class TestReidEmbed(unittest.TestCase):
         e = body["embeddings"][0]
         self.assertEqual((e["objectId"], e["dim"], len(e["reidEmbed"])), ("o1", 1024, 1024))
         self.assertEqual(body["failed"], [{"objectId": "o2", "reason": "embed failed"}])
+
+
+class TestRoiShapes(unittest.TestCase):
+    """thumbnailMeta.roi is one object in Protect's schema; some paths send a list."""
+
+    def test_video_objects_accepts_one_roi_object(self):
+        import numpy as np
+        body = {"thumbnailMeta": [{"ts": 1000,
+                                   "roi": {"coord": [10, 10, 50, 50], "trackerID": 7}}]}
+        with mock.patch("cv2.imread", return_value=np.zeros((100, 100, 3), np.uint8)):
+            objs = ucp4_client._video_objects(body, {1000: "f.jpg"})
+        self.assertEqual([o["trackerID"] for o in objs], [7])
+
+    def test_placeholder_accepts_one_roi_object(self):
+        out = ucp4_client._second_verifier_result({
+            "camera": "c", "event": "e",
+            "thumbnailMeta": [{"ts": 1, "roi": {"objectType": "person", "trackerID": 7}}]})
+        self.assertEqual(out["verificationResults"][0]["trackerID"], 7)
+
+    def test_second_verifier_accepts_one_roi_object(self):
+        out = ucp4_client.second_verifier.verify(None, {}, {
+            "event": "e",
+            "thumbnailMeta": [{"ts": 1, "roi": {"objectType": "person", "trackerID": 7}}]})
+        self.assertEqual(out["verificationResults"][0]["trackerID"], 7)
+
+    def test_legacy_body_types_derive_a_vehicle(self):
+        for otype in ("suv", "van", "bicycle", "pickup truck"):
+            body = {"ramType": "videoWithRecognition",
+                    "roiMeta": [{"ts": 1, "roi": [{"coord": [1, 2, 3, 4],
+                                                   "objectType": otype, "trackerId": 9}]}]}
+            derived = ucp4_client._roi_derived_metas(body)
+            self.assertEqual(derived["vehicle"][0]["roi"]["objectType"], otype)
+
+
+class TestRequestAiUrl(unittest.TestCase):
+    def test_posts_a_relative_resurl_on_the_console(self):
+        post = mock.Mock(return_value=mock.Mock(status_code=200, text="{}"))
+        body = {"resUrl": "/internal/aiprocessors/reverify",
+                "targetUri": ":7444/v1/models/second_verifier_mlabel/inference",
+                "payload": {"action": "classify", "params": {}}}
+        with mock.patch.object(ucp4_client.requests, "post", post), \
+                mock.patch.object(ucp4_client, "_verify_from_clip", return_value=None):
+            ucp4_client._post_request_ai_result("10.0.0.5", "fec", body)
+        self.assertEqual(post.call_args.args[0],
+                         "https://10.0.0.5:7444/internal/aiprocessors/reverify")
+
+    def test_verify_from_clip_uses_the_console_host(self):
+        with mock.patch.object(ucp4_client, "STATE_DIR", "/tmp/x"), \
+                mock.patch.object(ucp4_client, "_get_tagger", return_value=object()), \
+                mock.patch.object(ucp4_client.clip_fetch, "fetch_clip",
+                                  return_value=None) as fetch:
+            self.assertIsNone(ucp4_client._verify_from_clip(
+                {"event": "e", "reqUrl": "/internal/x?start=1",
+                 "thumbnailMeta": [{"ts": 1, "roi": {"objectType": "person", "trackerID": 7}}]},
+                "fec", "10.0.0.5"))
+        self.assertEqual(fetch.call_args.args[0],
+                         "https://10.0.0.5:7444/internal/x?start=1&format=mp4")
+
+
+if __name__ == "__main__":
+    unittest.main()

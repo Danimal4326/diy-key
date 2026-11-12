@@ -29,7 +29,9 @@ def _flatten_meta(meta):
 
 
 _ROI_PERSON = ("person",)
-_ROI_VEHICLE = ("vehicle", "car", "truck", "bus", "motorcycle")
+# The concrete body types a legacy roiMeta can carry; keep in step with lpr.VEHICLE_OBJECT_TYPES.
+_ROI_VEHICLE = ("vehicle", "car", "truck", "bus", "motorcycle", "motorbike", "bicycle", "bike",
+                "van", "suv", "pickup truck")
 
 
 def _roi_derived_metas(body):
