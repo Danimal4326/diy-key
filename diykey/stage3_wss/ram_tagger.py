@@ -292,6 +292,22 @@ def label_tag(tag):
     return noun in _LABEL_NOUNS or tag in UMBRELLA.values()
 
 
+# Protect names a class by family (personMeta/vehicleMeta) or by the concrete objectType of a
+# legacy roiMeta entry (car/truck/dog); normalise before the family/umbrella/species lookups.
+TYPE_ALIASES = {
+    "car": "vehicle", "truck": "vehicle", "bus": "vehicle", "motorcycle": "vehicle",
+    "motorbike": "vehicle", "bicycle": "vehicle", "bike": "vehicle", "van": "vehicle",
+    "suv": "vehicle", "pickup truck": "vehicle",
+    "dog": "animal", "cat": "animal", "bird": "animal",
+}
+
+
+def normalise_object_type(object_type):
+    """The Protect family (person/vehicle/animal) for an objectType, or '' when absent."""
+    otype = str(object_type or "").lower()
+    return TYPE_ALIASES.get(otype, otype)
+
+
 def plus_filter(plus_tags, object_type):
     """RAM++ tags that fit a crop of this Protect object type (see PLUS_PERSON_ONLY). On a
     person/vehicle/animal crop only label-producing tags survive: live 2026-11-07 doorbell person
@@ -307,6 +323,12 @@ def plus_filter(plus_tags, object_type):
             out.pop(t, None)
     if object_type and object_type != "vehicle":
         for t in PLUS_VEHICLE_ONLY:
+            out.pop(t, None)
+    if object_type:
+        # RAM++ says "person" on a car (or on the crack called "animal"); keeping another
+        # family's umbrella would make that family's alarms match. Keep only the crop's own.
+        own = UMBRELLA.get(object_type)
+        for t in set(UMBRELLA.values()) - {own}:
             out.pop(t, None)
     return out
 
@@ -401,8 +423,8 @@ def tag_crop(tagger, img_bgr, hint, frame_tags=None):
 
 def crop_tags(tagger, img_bgr, hint, frame_tags=None):
     """(tag_crop's tags, claimed_type_supported for this crop)."""
-    object_type = str(hint.get("objectType") or (hint.get("attributes") or {}).get("objectType")
-                      or "").lower()
+    object_type = normalise_object_type(hint.get("objectType")
+                                       or (hint.get("attributes") or {}).get("objectType"))
     family = FAMILY.get(object_type)
     attrs = hint.get("attributes") or {}
     family_tags = {COCO_TO_RAM.get(lbl, lbl) for lbl in family or ()}
@@ -432,7 +454,9 @@ def crop_tags(tagger, img_bgr, hint, frame_tags=None):
         for t in family_tags:
             found.pop(t, None)
         found[best] = round(species[best], 3)
-    for key in ("vehicleType", "color"):
+    # Colour only on a vehicle: Protect's label port emits color: for vehicles alone
+    # (protect_labels.py:35-38), and a lone red/white on a person matched colour rules.
+    for key in (("vehicleType", "color") if object_type == "vehicle" else ()):
         val = (attrs.get(key) or {}).get("val")
         if val:
             conf = round(min(1.0, (attrs[key].get("confidence") or 0) / 100), 3)

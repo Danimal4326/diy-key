@@ -141,6 +141,20 @@ class RamPlusTest(unittest.TestCase):
         self.assertEqual(set(ram_tagger.plus_filter(tags, "animal")), {"shirt"})
         self.assertEqual(set(ram_tagger.plus_filter(tags, None)), set(tags))
 
+    def test_other_family_umbrella_is_dropped(self):
+        tags = {"person": 0.9, "animal": 0.8, "vehicle": 0.7, "shirt": 0.6}
+        self.assertEqual(set(ram_tagger.plus_filter(tags, "vehicle")), {"vehicle", "shirt"})
+        self.assertEqual(set(ram_tagger.plus_filter(tags, "animal")), {"animal", "shirt"})
+        self.assertEqual(set(ram_tagger.plus_filter(tags, "person")), {"person", "shirt"})
+
+    def test_roi_body_types_normalise_to_the_family(self):
+        for otype in ("car", "truck", "bus", "motorcycle", "bicycle", "suv"):
+            self.assertEqual(ram_tagger.normalise_object_type(otype), "vehicle", otype)
+        for otype in ("dog", "cat", "bird"):
+            self.assertEqual(ram_tagger.normalise_object_type(otype), "animal", otype)
+        self.assertEqual(ram_tagger.normalise_object_type("person"), "person")
+        self.assertEqual(ram_tagger.normalise_object_type(None), "")
+
     def test_crop_keeps_only_label_tags(self):
         tags = {"man": 0.9, "oven": 0.86, "food": 0.8, "black shirt": 0.7, "glasses": 0.7,
                 "person": 0.8, "tray": 0.6}
@@ -221,6 +235,15 @@ class PlusMergeTest(unittest.TestCase):
         self.assertEqual(sorted(convert_ram_tags_to_labels("person", names)),
                          ["accessory:glasses", "clothingType:shirt", "gender:male"])
         self.assertIn("sofa", [t["tag"] for t in res["keyMomentsTags"][0]["tags"]])
+
+    def test_colour_is_gated_to_vehicles(self):
+        hint = {"objectType": "person", "confidence": 90,
+                "attributes": {"color": {"val": "red", "confidence": 95}}}
+        got = {t["tag"] for t in ram_tagger.tag_crop(FakeTagger(), self.img, hint)}
+        self.assertNotIn("red", got)
+        hint["objectType"] = "vehicle"
+        got = {t["tag"] for t in ram_tagger.tag_crop(FakeTagger(), self.img, hint)}
+        self.assertIn("red", got)
 
     def test_vehicle_umbrella_stays_when_the_camera_typed_it(self):
         # RAM++ sees no vehicle word here (sedan is below its threshold), COCO only person/car is
