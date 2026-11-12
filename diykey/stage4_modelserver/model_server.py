@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Model-serving HTTP endpoint on :7788, matching the real ui-infer-gateway.
 
 Confirmed live and from the firmware's ui-infer-gateway package. Returns the real

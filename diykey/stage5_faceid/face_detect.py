@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """RetinaFace face detection on the RK3588 NPU via rknnlite.
 
 Model: RetinaFace_mobile320 (biubug6/Pytorch_Retinaface, converted through

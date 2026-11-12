@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Face embedding (recognition) on the RK3588 NPU via rknnlite.
 
 Model: w600k_mbf (MobileFaceNet, insightface's buffalo_sc pack), fp16

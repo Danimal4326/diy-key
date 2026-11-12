@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Combined face detection + embedding pipeline, real inference on the
 RK3588 NPU. See face_detect.py/face_embed.py for the individual models.
 

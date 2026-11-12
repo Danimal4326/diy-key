@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Stub ProtectAPI gRPC server, byte-compatible with the real AI Key's
 uaibd/grpcserver/grpc_server.py (same .proto contract, copied from the
 real firmware's ui-uaibd package). Binds plaintext on :50051, exactly like

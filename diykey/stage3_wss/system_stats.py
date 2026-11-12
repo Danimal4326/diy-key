@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Real RK3588 hardware stats for the `systemMetrics` ucp4 RPC.
 
 Field-name shape is NOT confirmed from a live capture (the real request/
