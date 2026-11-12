@@ -72,8 +72,9 @@ Findings:
 +8.3 GB at 3.2 s per frame. Investigate the compile cost separately. Options:
 - `MLComputeUnits=CPUAndGPU`, which skips the ANE compile;
 - a pre-converted `.mlpackage`;
-- loading RAM++ in the background after the connection is up. Today it loads during
-  the first tagged event.
+- loading RAM++ in the background after the connection is up. The startup warm-up added
+  in this branch (`ucp4_client._warm_models`) does that; before it, the first tagged event
+  paid the load.
 
 ## 3. A smaller VLM than SmolVLM2-2.2B
 

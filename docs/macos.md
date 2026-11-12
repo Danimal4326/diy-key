@@ -79,7 +79,7 @@ restart           touch to restart DIY-Key
 | `DIYKEY_FACE_MODELS` | Folder holding the YuNet and SFace `.onnx` files (default `<diykey>/models`) |
 | `DIYKEY_FACE_ENHANCE_MODEL` | GFPGAN v1.4 ONNX for face enhancement; unset = the original face is uploaded |
 | `DIYKEY_LPR_THRESH`, `DIYKEY_LPR_MIN_PX` | Plate-detector score floor (default 0.5) and minimum plate width in pixels (60) |
-| `DIYKEY_FACE_MIN_PX` | Narrowest face sent to Protect, in frame pixels (default 40, 0 keeps all) |
+| `DIYKEY_FACE_MIN_PX` | Narrowest face sent to Protect, in frame pixels (default 40; the camera-linked path keeps a 20 px floor) |
 | `DIYKEY_REID_MODEL` | OSNet-AIN x1.0 MSMT17 checkpoint: person re-ID vectors and tap-to-find |
 | `DIYKEY_TASK_WORKERS`, `DIYKEY_TASK_QUEUE_MAX`, `DIYKEY_TASK_DROP_AGE_S` | Task pool: workers (default 1), max queued (200; full = drop), max wait before discard (900 s) |
 | `DIYKEY_PREFETCH_WORKERS` | Threads that download each event's clip and grab its frames as soon as the task arrives (default 2, `0` = off, download on the task worker). The task worker then only runs the models, so a slow download doesn't hold up the next event. In the timing line, `clip=`/`frames=` are then the prefetch times and `fetchwait=` is what the worker still waited |
