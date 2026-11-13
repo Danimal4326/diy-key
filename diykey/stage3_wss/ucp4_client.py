@@ -596,8 +596,7 @@ UNKNOWN_ACTION_CODE = -95
 # for; Protect expects them to succeed. locate stays an ack although supportLocate is false.
 ACK_ONLY_ACTIONS = frozenset({
     "getSupportInfo", "setInfo", "updateTimezone", "sshService", "locate",
-    "updateLcmSettings", "setConsoleInfo",
-    "speechToText", "RequestTts"})
+    "updateLcmSettings", "setConsoleInfo", "RequestTts"})
 # Actions handled by the if/elif chains in handle_action (the ones above are acks too).
 HANDLED_ACTIONS = frozenset({
     "getInfo", "firmwareState", "updateFirmware", "networkStatus", "changeUserPassword",
@@ -809,6 +808,12 @@ def handle_action(head, body, device_info):
                          args=(_segment_video, device_info["console_host"],
                                device_info["mac_nosep"], body),
                          daemon=True, name="diykey-segment-video").start()
+    elif action == "RequestAI" and str((body or {}).get("targetUri") or "").endswith(
+            SEGMENT_IMAGE_URI):
+        threading.Thread(target=_fast_lane_run,
+                         args=(_segment_image, device_info["console_host"],
+                               device_info["mac_nosep"], body),
+                         daemon=True, name="diykey-segment-image").start()
     elif action == "RequestAI":
         # targetUri (":7788/v1/models/<model>/inference") means "call your own
         # local gateway": there is no console callback into :7788.
@@ -817,6 +822,11 @@ def handle_action(head, body, device_info):
     elif action == "reboot":
         _request_restart("reboot RPC", (device_info or {}).get("ws"))
         return {}
+    elif action == "speechToText":
+        # The real key has an STT model; this build does not. An empty ack would tell
+        # Protect the transcript is coming, so fail the request instead.
+        log.warning("speechToText is not implemented on this build")
+        raise ActionError(UNKNOWN_ACTION_CODE, "speechToText is not supported")
     elif action in ("factoryReset", "restoreDefault"):
         _factory_reset(action)
     elif action in ACK_ONLY_ACTIONS:
@@ -923,18 +933,23 @@ def _post_request_ai_result(console_host, mac_nosep, task_body):
     m = re.search(r"/v1/models/([^/]+)/inference", target_uri)
     if m:
         model_name = m.group(1)
+    elif target_uri.endswith(SEARCH_RERANK_URI):
+        model_name = "search-reranking"
 
-    if model_name == "second_verifier_mlabel":
+    if model_name in ("second_verifier_mlabel", PPE_MODEL):
+        # ppe_mlabel and second_verifier_mlabel are both person/vehicle/animal
+        # multilabel models over the claimed boxes; the reply schema is the same.
         result = _verify_from_clip(params, mac_nosep, console_host) \
             or _second_verifier_result(params)
     else:
-        log.warning("RequestAI for unhandled model %r, sending empty result", model_name)
-        result = {}
+        log.warning("RequestAI for unhandled model %r, reporting it as unsupported", model_name)
+        result = {"error": f"unhandled model {model_name}"}
 
     response_body = {
         "model": model_name,
         "action": action,
-        "inference_time_ms": 0.0,
+        "inference_time_ms": float(result.get("inferMs", 0.0))
+        if isinstance(result, dict) else 0.0,
         "result": result,
     }
 
@@ -1665,7 +1680,10 @@ def _handle_enhance_image_group(console_host, mac_nosep, body):
 DESCRIBE_URI = ":7968/describe"
 EMBED_URI = ":7445/generate-embeddings"
 SEGMENT_URI = ":7445/segment-video"
+SEGMENT_IMAGE_URI = ":7445/segment"
+SEARCH_RERANK_URI = ":7445/search-reranking"
 DESCRIBE_MODEL = "diykey-vlm"
+PPE_MODEL = "ppe_mlabel"
 
 
 def _describe_frame(console_host, mac_nosep, payload):
@@ -1885,6 +1903,50 @@ def _segment_video(console_host, mac_nosep, task_body):
                  else out["error"], resp.status_code)
     except requests.RequestException as e:
         log.warning("segment-video POST failed: %r", e)
+
+
+def _segment_image(console_host, mac_nosep, task_body):
+    """RequestAI :7445/segment on a still: payload {imageUrl|reqUrl}; POST {"results": [...]}
+    or {"error": ...} to resUrl, the same result shape as /segment-video."""
+    import cv2
+
+    payload = (task_body or {}).get("payload") or {}
+    res_url = (task_body or {}).get("resUrl")
+    if not res_url:
+        return
+    url = payload.get("imageUrl") or payload.get("reqUrl")
+    out = {"error": "no image"}
+    path = None
+    try:
+        tagger = _get_tagger()
+        if not tagger or not reid_model.enabled() or not STATE_DIR:
+            out = {"error": "no re-ID model"}
+        elif url:
+            path = os.path.join(STATE_DIR, "clips", "segment",
+                                f"segment-image-{uuid.uuid4().hex}.jpg")
+            if clip_fetch.fetch_image(_abs_url(console_host, url), _callback_headers(mac_nosep),
+                                      (CERT_PATH, KEY_PATH), path):
+                img = cv2.imread(path)
+                if img is not None:
+                    out = {"results": _segment_results(tagger, img)}
+    except Exception as e:  # noqa: BLE001 -- Protect is waiting on this reply
+        log.warning("segment-image failed: %r", e)
+        out = {"error": "Internal server error"}
+    finally:
+        if path:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+    try:
+        resp = requests.post(_abs_url(console_host, res_url),
+                             headers=_callback_headers(mac_nosep), json=out,
+                             cert=(CERT_PATH, KEY_PATH), verify=False, timeout=15)
+        log.info("segment-image: %s -> %s",
+                 len(out.get("results", [])) if "results" in out else out["error"],
+                 resp.status_code)
+    except requests.RequestException as e:
+        log.warning("segment-image POST failed: %r", e)
 
 
 # requestAi's visionToLanguage target (Protect M/490990:11).

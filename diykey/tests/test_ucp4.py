@@ -315,6 +315,10 @@ class TestHandleAction(_StateDirTest):
         self.assertNotIn("restoreDefault", ucp4_client.ACK_ONLY_ACTIONS)
         self.assertNotIn("reboot", ucp4_client.ACK_ONLY_ACTIONS)
 
+    def test_speech_to_text_is_not_acknowledged(self):
+        with self.assertRaises(ucp4_client.ActionError):
+            self._call("speechToText")
+
     def test_reboot_requests_a_real_restart(self):
         device = {**self.DEVICE, "ws": mock.Mock()}
         with mock.patch.object(ucp4_client, "_request_restart") as restart:
@@ -1890,6 +1894,59 @@ class TestRequestAiUrl(unittest.TestCase):
                 "fec", "10.0.0.5"))
         self.assertEqual(fetch.call_args.args[0],
                          "https://10.0.0.5:7444/internal/x?start=1&format=mp4")
+
+
+class TestRequestAiModels(unittest.TestCase):
+    def _post(self, target, params=None):
+        post = mock.Mock(return_value=mock.Mock(status_code=200, text="{}"))
+        body = {"resUrl": "/internal/aiprocessors/x", "targetUri": target,
+                "payload": {"action": "classify", "params": params or {}}}
+        with mock.patch.object(ucp4_client.requests, "post", post), \
+                mock.patch.object(ucp4_client, "_verify_from_clip", return_value=None):
+            ucp4_client._post_request_ai_result("10.0.0.5", "fec", body)
+        return post.call_args.kwargs["json"]
+
+    def test_ppe_mlabel_uses_the_verifier_schema(self):
+        out = self._post(":7788/v1/models/ppe_mlabel/inference", {
+            "thumbnailMeta": [{"ts": 1, "roi": {"objectType": "person", "trackerID": 7}}]})
+        self.assertEqual(out["model"], "ppe_mlabel")
+        self.assertEqual(out["result"]["verificationResults"][0]["trackerID"], 7)
+
+    def test_unhandled_model_reports_an_error(self):
+        out = self._post(":7788/v1/models/foo/inference")
+        self.assertIn("error", out["result"])
+
+    def test_search_reranking_reports_unsupported(self):
+        out = self._post(":7445/search-reranking")
+        self.assertIn("error", out["result"])
+
+
+class TestSegmentImage(unittest.TestCase):
+    def test_posts_results(self):
+        task = {"resUrl": "/internal/aiprocessors/segments",
+                "payload": {"imageUrl": "/internal/image/i1"}}
+        post = mock.Mock(return_value=mock.Mock(status_code=200, text="{}"))
+        with mock.patch.object(ucp4_client, "_get_tagger", return_value=object()), \
+                mock.patch.object(ucp4_client.reid_model, "enabled", return_value=True), \
+                mock.patch.object(ucp4_client, "STATE_DIR", "/tmp/x"), \
+                mock.patch.object(ucp4_client.clip_fetch, "fetch_image", return_value=True), \
+                mock.patch("cv2.imread", return_value=object()), \
+                mock.patch.object(ucp4_client, "_segment_results",
+                                  return_value=[{"bbox": [0, 0, 1, 1]}]), \
+                mock.patch.object(ucp4_client.requests, "post", post):
+            ucp4_client._segment_image("10.0.0.5", "fec", task)
+        self.assertEqual(post.call_args.kwargs["json"],
+                         {"results": [{"bbox": [0, 0, 1, 1]}]})
+        self.assertEqual(post.call_args.args[0],
+                         "https://10.0.0.5:7444/internal/aiprocessors/segments")
+
+    def test_no_model_reports_an_error(self):
+        task = {"resUrl": "/x", "payload": {"imageUrl": "/i"}}
+        post = mock.Mock(return_value=mock.Mock(status_code=200, text="{}"))
+        with mock.patch.object(ucp4_client, "_get_tagger", return_value=None), \
+                mock.patch.object(ucp4_client.requests, "post", post):
+            ucp4_client._segment_image("10.0.0.5", "fec", task)
+        self.assertEqual(post.call_args.kwargs["json"], {"error": "no re-ID model"})
 
 
 class TestNlSearchReply(unittest.TestCase):
