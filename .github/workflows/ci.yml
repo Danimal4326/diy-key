@@ -1,0 +1,37 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+name: CI
+on: [push, pull_request]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - name: Install dependencies (torch from PyTorch's CPU index)
+        run: |
+          # requirements-clip.txt's torch would pull the multi-GB CUDA build; the CPU one runs every test.
+          cat diykey/requirements.txt diykey/requirements-lpr.txt diykey/requirements-clip.txt \
+            | grep -vE '^(torch|open_clip_torch)([<>=! ]|$)' > /tmp/requirements-base.txt
+          pip install -r /tmp/requirements-base.txt
+          pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+          pip install "open_clip_torch>=2.24"
+      - name: Unit tests
+        run: python -m unittest discover -s diykey/tests -v
+
+  docker:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        ort: [cpu, openvino]   # openvino: Intel GPU build; runners have no GPU, so it runs on CPU
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build image (ORT=${{ matrix.ort }})
+        run: docker build -f docker/Dockerfile --build-arg ORT=${{ matrix.ort }} -t diykey:ci .
+      - name: Smoke test
+        run: docker/smoke-test.sh diykey:ci
