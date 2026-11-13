@@ -32,6 +32,14 @@ from unifi.core.console.v1 import types_pb2 as console_types_pb2
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("diykey-grpc-stub")
 
+RESTART_EXIT_CODE = 75
+
+
+def _restart_after(delay=1.0):
+    """Exit non-zero so run_all/systemd/launchd restart the whole device, like a real key."""
+    threading.Thread(target=lambda: (time.sleep(delay), os._exit(RESTART_EXIT_CODE)),
+                     daemon=True, name="diykey-grpc-restart").start()
+
 
 
 class StubAIKeyService(api_pb2_grpc.ProtectAPIServicer):
@@ -83,19 +91,23 @@ class StubAIKeyService(api_pb2_grpc.ProtectAPIServicer):
             time.sleep(1)
 
     def RestartDevice(self, request, context):
-        log.warning("RestartDevice() requested by %s -- NOT actually rebooting (stub)",
-                    context.peer())
+        log.warning("RestartDevice() requested by %s; restarting the service", context.peer())
+        _restart_after()
         return api_pb2.RestartDeviceResponse()
 
     def UpdateDevice(self, request, context):
-        log.warning("UpdateDevice() (OTA trigger) requested by %s -- ignored (stub)",
-                    context.peer())
-        return api_pb2.UpdateDeviceResponse()
+        # There is no OTA source on this build. Protect's real OTA path is updateFirmware over
+        # ucp4, which downloads and pins a version; do not report a false success here.
+        log.warning("UpdateDevice() from %s: no OTA source on this build", context.peer())
+        context.abort(grpc.StatusCode.UNIMPLEMENTED,
+                      "UpdateDevice needs an OTA source; use updateFirmware over ucp4")
 
     def UpdateSettings(self, request, context):
-        log.info("UpdateSettings() from %s: mask=%s settings=%s",
-                  context.peer(), list(request.mask.paths), request.settings)
-        return api_pb2.UpdateSettingsResponse()
+        # Settings live in the ucp4 process; this stub cannot apply them, so fail rather
+        # than acknowledge and leave DeviceStatus lying.
+        log.warning("UpdateSettings() from %s: not applied by the gRPC stub", context.peer())
+        context.abort(grpc.StatusCode.UNIMPLEMENTED,
+                      "UpdateSettings is applied over ucp4 changeAiInferAgentSettings")
 
 
 def main():
