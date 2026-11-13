@@ -1,5 +1,5 @@
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
-# DIY-Key — a UniFi Protect "AI Key" emulator on an Orange Pi
+# diy-key: a UniFi Protect AI Key emulator on an Orange Pi
 
 <div align="center">
 
@@ -9,8 +9,8 @@
 Orange Pi 5 Plus present itself to a real UniFi Protect console as genuine AI Key
 hardware (device class `aiprocessors`, type `UP-AI-KEY`, sysid `0xa5f0`).**
 
-**It speaks the vendor wire protocol only — UDP discovery, HTTPS adoption, the
-mTLS `ucp4` WebSocket, on-demand AI task dispatch and result callbacks — with no
+**It speaks the vendor wire protocol only (UDP discovery, HTTPS adoption, the
+mTLS `ucp4` WebSocket, on-demand AI task dispatch and result callbacks), with no
 firmware modification, no controller database writes, and no Ubiquiti code or
 binaries.**
 
@@ -72,7 +72,7 @@ workspace.
 |  |  |
 | --- | --- |
 | **What** | Emulates the UniFi Protect AI Key device role |
-| **Hardware** | Orange Pi 5 Plus (RK3588 NPU) — verified live; any Linux host for the protocol stack |
+| **Hardware** | Orange Pi 5 Plus (RK3588 NPU), verified live; any Linux host for the protocol stack |
 | **Protocol / interface** | UBNT discovery UDP/10001; HTTPS :8080 adopt; mTLS WSS :7442 (`ucp4`); callbacks to console :7444; Postgres :5432; gRPC :50051 (stub) |
 | **Language** | Python 3.11+ |
 | **Status** | Proof of concept: adoption and the live RPC handshake verified against a real UNVR; face pipeline NPU-proven but not yet wired into dispatch |
@@ -94,8 +94,8 @@ Protect console                         DIY-Key (Orange Pi)
 ```
 
 The device is an **AI Key**, not a camera: it never pulls RTSP video. The console
-dispatches work on demand — a clip URL for `recognizeKeyFrames`, or a local
-model-inference request for `RequestAI` — and the device reports results over the
+dispatches work on demand (a clip URL for `recognizeKeyFrames`, or a local
+model-inference request for `RequestAI`), and the device reports results over the
 console's internal API and/or Postgres. Identity is a persistent MAC/device-id
 plus an EC P-256 client certificate whose fingerprint the console pins at
 adoption; the token is single-use.
@@ -127,7 +127,7 @@ adoption; the token is single-use.
 - Wired AI work in `stage3_wss/`: SFace face recognition, fast-alpr plates, GFPGAN
   enhancement, VLM summaries, OSNet re-ID and per-camera scene memory.
 - Face detection (`RetinaFace_mobile320`) and embedding (`w600k_mbf`) running on
-  the RK3588 NPU — see the limitation below before using the embeddings.
+  the RK3588 NPU; see the limitation below before using the embeddings.
 
 ## Requirements
 
@@ -160,9 +160,9 @@ adoption; the token is single-use.
 
 ## Install and usage
 
-The full walkthrough — venv, generated bindings, PostgreSQL/pgvector, the macvlan
+The full walkthrough (venv, generated bindings, PostgreSQL/pgvector, the macvlan
 instance, and migrating an already-adopted identity without changing the pinned
-cert — is in [`diykey/README.md`](diykey/README.md). The short version:
+cert) is in [`diykey/README.md`](diykey/README.md). The short version:
 
 ```bash
 cd diykey
@@ -180,7 +180,7 @@ manager. The key is mode 0600; never commit the state directory.
 device-id, guid), `[network]`, `[console]` and `[logging]`. Every value has a
 `DIYKEY_*` environment override and CLI flags; CLI wins, then env, then the file.
 Do not change `device_id`/`guid`/MAC once a console has adopted the device, and
-do not regenerate `server.crt`/`server.key` without un-adopting first — the
+do not regenerate `server.crt`/`server.key` without un-adopting first; the
 console pins the fingerprint.
 
 ## Verification
@@ -250,7 +250,8 @@ as something to verify on your own hardware.
 This is a proof of concept. It is not production software and comes with no
 warranty of any kind, express or implied. It manipulates network interfaces,
 DHCP leases, self-signed certificates and device identities; misconfiguration
-can disrupt your network, your Protect console or the device it runs on.
+can disrupt your network, your Protect console or the device it runs on. The
+authors are not liable for any damage or loss arising from its use.
 
 Use it only on hardware and consoles you own and control. Do not use it to
 impersonate devices on networks you do not own. You are responsible for

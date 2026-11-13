@@ -70,7 +70,7 @@ DIYKEY_RAM_MODEL=/root/models/yolov9-s-320.onnx
 # DIYKEY_FACE_ENHANCE=1  # face enhancement
 # DIYKEY_FACE_ENHANCE_MODEL=/path/to/gfpgan_1.4.onnx
 # DIYKEY_VLM=transformers  # AI summary on Linux (mlx is macOS only); needs pip install transformers
-# DIYKEY_VLM_MODEL=mlx-community/<SmolVLM2 or Qwen3-VL-2B repo>
+# DIYKEY_VLM_MODEL=/path/to/InternVL2.5-1B   # local checkpoint for transformers
 # DIYKEY_TASK_WORKERS=1
 # DIYKEY_TASK_QUEUE_MAX=200
 EOF
@@ -80,8 +80,8 @@ sudo systemctl restart diy-key-instance-main
 `EnvironmentFile` is `-`-prefixed, so a missing file does not stop the unit. Identity and
 network stay in the unit (macvlan MAC, `--state-dir`); the env file is for the AI settings
 only. `DIYKEY_FW_VERSION` / `DIYKEY_DISCOVERY_FW_VERSION` also work there if you want to pin a
-factory version without touching `diykey.cfg`. The full list of keys is in
-`scripts/diykey.env.example`.
+factory version without touching `diykey.cfg`. The AI settings keys are in
+`scripts/diykey.env.example`; identity and network overrides are in `core/config.py`.
 
 ## Verify
 
