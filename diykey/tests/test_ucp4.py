@@ -1824,18 +1824,18 @@ class TestReidEmbed(unittest.TestCase):
 
     def test_handler_reply_shape(self):
         post = mock.Mock(return_value=mock.Mock(status_code=200, text="{}"))
-        vecs = iter([[0.1] * 1024, None])
+        vecs = iter([[0.1] * 512, None])
         with mock.patch.dict(os.environ, {"DIYKEY_REID_MODEL": "/m.pth"}), \
                 mock.patch.object(ucp4_client, "STATE_DIR", "/tmp/x"), \
                 mock.patch.object(ucp4_client.clip_fetch, "fetch_image", return_value="/tmp/x.jpg"), \
                 mock.patch("cv2.imread", return_value=object()), \
-                mock.patch.object(ucp4_client.reid_model, "embed", lambda _i: next(vecs)), \
+                mock.patch.object(ucp4_client.reid_model, "embed_raw", lambda _i: next(vecs)), \
                 mock.patch.object(ucp4_client.requests, "post", post):
             ucp4_client._handle_generate_embeddings("10.0.0.5", "fcecdaaabbcc", self._task())
         body = post.call_args.kwargs["json"]
         self.assertEqual(len(body["embeddings"]), 1)
         e = body["embeddings"][0]
-        self.assertEqual((e["objectId"], e["dim"], len(e["reidEmbed"])), ("o1", 1024, 1024))
+        self.assertEqual((e["objectId"], e["dim"], len(e["reidEmbed"])), ("o1", 512, 512))
         self.assertEqual(body["failed"], [{"objectId": "o2", "reason": "embed failed"}])
 
 

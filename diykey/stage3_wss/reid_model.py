@@ -180,8 +180,8 @@ def _load():
     return _loaded
 
 
-def embed(img_bgr):
-    """Raw vector of REID_DIM floats for a person crop (BGR), or None."""
+def embed_raw(img_bgr):
+    """The model's own vector (OSNet is 512) for a person crop (BGR), or None."""
     if not enabled() or img_bgr is None or img_bgr.size == 0:
         return None
     loaded = _load()
@@ -200,4 +200,12 @@ def embed(img_bgr):
         return None
     if not np.isfinite(v).all():
         return None
-    return [float(f) for f in v] + [0.0] * (REID_DIM - v.size)
+    return [float(f) for f in v]
+
+
+def embed(img_bgr):
+    """Zero-padded to REID_DIM for ramDetections.reidEmbedding, or None."""
+    raw = embed_raw(img_bgr)
+    if raw is None:
+        return None
+    return raw[:REID_DIM] + [0.0] * max(0, REID_DIM - len(raw))

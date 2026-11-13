@@ -56,6 +56,51 @@ class EmbedTest(unittest.TestCase):
                 self.assertLogs("diykey.reid", "WARNING"):
             self.assertIsNone(reid_model.embed(img))
 
+    def test_raw_vector_is_model_native_and_embed_pads_to_1024(self):
+        class _Vec:
+            def float(self):
+                return self
+
+            def cpu(self):
+                return self
+
+            @staticmethod
+            def numpy():
+                return np.full((1, 512), 0.5, np.float32)
+
+        class _Tensor:
+            def unsqueeze(self, n):
+                return self
+
+            def to(self, device):
+                return self
+
+        class _Torch:
+            @staticmethod
+            def from_numpy(x):
+                return _Tensor()
+
+            class no_grad:
+                def __enter__(self):
+                    return None
+
+                def __exit__(self, *args):
+                    return False
+
+        class _Model:
+            def __call__(self, tensor):
+                return _Vec()
+
+        img = np.zeros((32, 16, 3), np.uint8)
+        with mock.patch.dict(os.environ, ENV), \
+                mock.patch.object(reid_model, "_load",
+                                  return_value=(_Model(), "cpu", _Torch)):
+            raw = reid_model.embed_raw(img)
+            padded = reid_model.embed(img)
+        self.assertEqual(len(raw), 512)
+        self.assertEqual(len(padded), 1024)
+        self.assertEqual(padded[512:], [0.0] * 512)
+
     @unittest.skipUnless(HAS_TORCH, "torch not installed")
     def test_padded_to_protect_width_and_not_normalised(self):
         import torch

@@ -1788,12 +1788,12 @@ def _handle_describe(console_host, mac_nosep, task_body):
 def _handle_generate_embeddings(console_host, mac_nosep, task_body):
     """RequestAI :7445/generate-embeddings (M/851272:212-225): payload {camera, event,
     images:[{reqUrl, thumbnailId, objectId, ...}]}; reply POSTs {camera, event, embeddings:
-    [{objectId, objectType, reidEmbed[1024], model, dim}], failed:[{objectId, reason}]} to resUrl
+    [{objectId, objectType, reidEmbed, model, dim}], failed:[{objectId, reason}]} to resUrl
     (schema M/761379:376-400; saveEmbeddings M/579892:21-70 keeps only vectors for person objects
-    of that event and groups them into sessions). Each crop gets reid_model.embed, the same
-    vector space as thumbnailTags reidEmbed. Without DIYKEY_REID_MODEL, or per crop that cannot
-    be fetched/embedded, objects are reported failed so the task completes at once instead of
-    timing out."""
+    of that event and groups them into sessions). This table is vector(512) per protocol.md §6,
+    so the model's native vector is sent; ramDetections.reidEmbedding is the 1024-d padded one.
+    Without DIYKEY_REID_MODEL, or per crop that cannot be fetched/embedded, objects are
+    reported failed so the task completes at once instead of timing out."""
     import cv2
     payload = (task_body or {}).get("payload") or {}
     res_url = (task_body or {}).get("resUrl")
@@ -1813,7 +1813,7 @@ def _handle_generate_embeddings(console_host, mac_nosep, task_body):
         path = os.path.join(STATE_DIR, "clips", "embed", f"{tag}-{i}.jpg")
         if req and clip_fetch.fetch_image(_abs_url(console_host, req), hdr, cert, path):
             try:
-                vec = reid_model.embed(cv2.imread(path))
+                vec = reid_model.embed_raw(cv2.imread(path))
             except Exception as e:  # noqa: BLE001 -- one bad crop must not sink the task
                 log.warning("generateEmbeddings: embed failed for %s: %r", oid, e)
         if vec:
