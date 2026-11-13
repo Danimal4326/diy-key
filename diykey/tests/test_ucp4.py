@@ -163,6 +163,15 @@ class TestHandleAction(_StateDirTest):
             self.assertTrue(flags[name]["enabled"], name)
         self.assertFalse(self._flags(DIYKEY_PERSON_REID="0")["supportPersonReId"]["enabled"])
 
+    def test_advertise_all_matches_the_firmware_set(self):
+        flags = self._flags(DIYKEY_ADVERTISE_ALL="1")
+        for name in ("supportFaceEnhancement", "supportRetroactiveProcessing",
+                     "supportImageSearch", "supportRecognizeAnything",
+                     "supportFaceRecognition", "supportLicensePlateRecognition",
+                     "supportAiSummary", "supportReverification"):
+            self.assertTrue(flags[name]["enabled"], name)
+        self.assertFalse(flags["supportLocate"])
+
     def test_feature_flags_falsy_values(self):
         flags = self._flags(DIYKEY_FACE="0", DIYKEY_LPR="", DIYKEY_VLM="off", DIYKEY_RAM_MODEL="")
         for name in ("supportFaceRecognition", "supportLicensePlateRecognition",
