@@ -13,8 +13,9 @@
 # container. entrypoint.sh creates the cluster on first start under /data/pg.
 #
 # TORCH=1 adds CPU-only torch + open_clip for Find Anything (DIYKEY_CLIP/DIYKEY_NL_SEARCH) and
-# OSNet re-ID; from PyTorch's CPU index, since requirements.txt's torch would pull the multi-GB
-# CUDA build. Everything else in requirements.txt (onnxruntime, OpenCV, fast-alpr) is always in.
+# OSNet re-ID; from PyTorch's CPU index, since requirements-clip.txt's torch would pull the multi-GB
+# CUDA build. requirements.txt (onnxruntime, OpenCV), requirements-lpr.txt (fast-alpr) and the rest
+# of requirements-clip.txt (Pillow, tokenizers for the ONNX CLIP) are always in.
 #
 # ORT=openvino (amd64) swaps onnxruntime for onnxruntime-openvino and adds Intel's GPU compute
 # runtime, so DIYKEY_ORT_DEVICE=GPU runs the onnxruntime models on an Intel iGPU/Arc (see
@@ -71,12 +72,13 @@ RUN case "$TORCH" in 0|1) ;; *) echo "TORCH must be 0 or 1" >&2; exit 1 ;; esac 
 
 ENV VIRTUAL_ENV=/opt/venv PATH=/opt/venv/bin:$PATH \
     PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
-COPY diykey/requirements.txt /tmp/requirements.txt
+COPY diykey/requirements.txt diykey/requirements-lpr.txt diykey/requirements-clip.txt /tmp/
 # ORT=openvino: onnxruntime-openvino ships the same "onnxruntime" module, so the plain wheel
 # (also pulled in for fast-alpr) is removed first, and the build fails without the provider.
 # hadolint ignore=DL3013
 RUN python3 -m venv "$VIRTUAL_ENV" \
- && grep -vE '^(torch|open_clip_torch)([<>=! ]|$)' /tmp/requirements.txt > /tmp/requirements-base.txt \
+ && cat /tmp/requirements.txt /tmp/requirements-lpr.txt /tmp/requirements-clip.txt \
+    | grep -vE '^(torch|open_clip_torch)([<>=! ]|$)' > /tmp/requirements-base.txt \
  && pip install --no-cache-dir -r /tmp/requirements-base.txt \
  && if [ "$TORCH" = 1 ]; then \
         pip install --no-cache-dir torch torchvision --index-url https://download.pytorch.org/whl/cpu \
