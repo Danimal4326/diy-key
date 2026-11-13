@@ -313,6 +313,13 @@ class TestHandleAction(_StateDirTest):
             self.assertEqual(self._call(action), {}, action)
         self.assertNotIn("factoryReset", ucp4_client.ACK_ONLY_ACTIONS)
         self.assertNotIn("restoreDefault", ucp4_client.ACK_ONLY_ACTIONS)
+        self.assertNotIn("reboot", ucp4_client.ACK_ONLY_ACTIONS)
+
+    def test_reboot_requests_a_real_restart(self):
+        device = {**self.DEVICE, "ws": mock.Mock()}
+        with mock.patch.object(ucp4_client, "_request_restart") as restart:
+            self.assertEqual(ucp4_client.handle_action({"action": "reboot"}, {}, device), {})
+        restart.assert_called_once()
 
     def test_unknown_action_is_an_error(self):
         with self.assertLogs("ucp4-client", "WARNING"), \
@@ -565,6 +572,15 @@ class TestUpdateFirmware(_StateDirTest):
         self.assertEqual(self._call("updateFirmware",
             {"uri": "https://h/internal/update/p/AI-Key/firmware/2.2.8/MAC"}), {})
         self.assertEqual(self._call("getInfo")["version"], "2.2.8")
+
+    def test_simulate_update_restarts_the_service(self):
+        ws = mock.Mock()
+        with mock.patch.object(ucp4_client, "FAKE_UPDATE_S", 0), \
+                mock.patch.object(ucp4_client.config, "pin_fw_version"), \
+                mock.patch.object(ucp4_client, "_request_restart") as restart:
+            ucp4_client._simulate_update(ws, "2.2.8", {}, "mac")
+        restart.assert_called_once()
+        self.assertIs(restart.call_args.args[1], ws)
 
     def test_update_uses_latest_from_firmware_state(self):
         self._call("firmwareState", {"latestFirmwareVersion": "2.3.0"})

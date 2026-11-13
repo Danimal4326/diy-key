@@ -182,10 +182,29 @@ def _version_from_update_uri(uri):
     return dict(parse_qsl(parts.query)).get("version") or None
 
 
+RESTART_EXIT_CODE = 75
+
+
+def _request_restart(reason, ws=None):
+    """Exit non-zero so the supervisor restarts every stage, like a real reboot.
+
+    run_all returns 1 when a component exits, systemd restarts on failure, and the macOS
+    wrapper loops, so this resets PROCESS_START (uptime) and reloads every model.
+    """
+    log.warning("device restart requested: %s", reason)
+    if ws is not None:
+        try:
+            ws.close()
+        except Exception:  # noqa: BLE001 -- already closed is fine
+            pass
+    threading.Thread(target=lambda: (time.sleep(0.5), os._exit(RESTART_EXIT_CODE)),
+                     daemon=True, name="diykey-restart").start()
+
+
 def _simulate_update(ws, target, body, mac_nosep):
     """Keep a copy of the firmware (unless DIYKEY_FW_DOWNLOAD=0), pretend to flash, pin the
-    new version, then drop the connection as the reboot. The reconnect reports the pinned
-    version, which ends Protect's update. Nothing is ever installed."""
+    new version, then restart the service as the reboot. The reconnect reports the pinned
+    version with a fresh uptime, which ends Protect's update. Nothing is ever installed."""
     t0 = time.monotonic()
     if os.environ.get("DIYKEY_FW_DOWNLOAD", "1") != "0" and body.get("uri"):
         log.info("updateFirmware: downloading %s to %s", target, firmware.firmware_dir())
@@ -195,11 +214,8 @@ def _simulate_update(ws, target, body, mac_nosep):
     log.info("updateFirmware: simulating install of %s for %.0fs", target, wait)
     time.sleep(wait)
     config.pin_fw_version(STATE_DIR, target)
-    log.info("updateFirmware: now on %s; simulated reboot (closing ucp4)", target)
-    try:
-        ws.close()
-    except Exception:  # noqa: BLE001 -- already closed is fine
-        pass
+    log.info("updateFirmware: now on %s; restarting the service", target)
+    _request_restart(f"firmware update to {target}", ws)
 
 
 def _psql_path():
@@ -579,7 +595,7 @@ UNKNOWN_ACTION_CODE = -95
 # Admin actions the firmware routes (ui-websocketd + syswrapper) that DIY-Key has nothing to do
 # for; Protect expects them to succeed. locate stays an ack although supportLocate is false.
 ACK_ONLY_ACTIONS = frozenset({
-    "getSupportInfo", "setInfo", "updateTimezone", "sshService", "locate", "reboot",
+    "getSupportInfo", "setInfo", "updateTimezone", "sshService", "locate",
     "updateLcmSettings", "setConsoleInfo",
     "speechToText", "RequestTts"})
 # Actions handled by the if/elif chains in handle_action (the ones above are acks too).
@@ -587,7 +603,7 @@ HANDLED_ACTIONS = frozenset({
     "getInfo", "firmwareState", "updateFirmware", "networkStatus", "changeUserPassword",
     "changeAiInferAgentSettings", "diskInfo", "systemMetrics", "getTaskQueueInfo",
     "recognizeKeyFrames", "fastReverification", "enhanceImage", "enhanceImageGroup",
-    "RequestAI", "factoryReset", "restoreDefault"})
+    "RequestAI", "factoryReset", "restoreDefault", "reboot"})
 _ack_only_logged = set()
 # Tokens are single-use: send X-Token only the first time a value is seen. Module-level so a
 # factory reset can forget them (a re-adopt may legitimately reuse nothing, but stale entries
@@ -798,6 +814,9 @@ def handle_action(head, body, device_info):
         # local gateway": there is no console callback into :7788.
         _submit_task("RequestAI", _post_request_ai_result,
                      (device_info["console_host"], device_info["mac_nosep"], body))
+    elif action == "reboot":
+        _request_restart("reboot RPC", (device_info or {}).get("ws"))
+        return {}
     elif action in ("factoryReset", "restoreDefault"):
         _factory_reset(action)
     elif action in ACK_ONLY_ACTIONS:
