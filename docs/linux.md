@@ -32,11 +32,34 @@ sudo apt-get install -y python3-venv ffmpeg postgresql isc-dhcp-client
 python3 -m venv ~/diykey-venv
 . ~/diykey-venv/bin/activate
 pip install -r diykey/requirements.txt
+# Optional AI stacks, only for the features you enable:
+# pip install -r diykey/requirements-clip.txt   # DIYKEY_CLIP
+# pip install -r diykey/requirements-lpr.txt    # DIYKEY_LPR
+# pip install -r diykey/requirements-vlm.txt    # DIYKEY_VLM=transformers
 ```
 
 `onnxruntime` (RAM tags, verification) is a normal aarch64 wheel. `torch` + `open_clip_torch`
-are only needed when `DIYKEY_CLIP=1`; they install on aarch64 but are large, and CPU CLIP is
-slow — leave Find Anything off unless you want it on the board.
+live in `requirements-clip.txt` because they are large and CPU CLIP is slow; leave Find
+Anything off unless you want it on the board.
+
+## PostgreSQL for AI results
+
+Protect connects directly to the key's database and writes `ramDetections` and the session
+search tables there. A RAM-only instance can skip this; Find Anything, alarms and tap-to-find
+need it. Use the same role and database as the real key, then allow the console:
+
+```bash
+sudo -u postgres createuser --superuser unifi-protect
+sudo -u postgres createdb -O unifi-protect unifi-protect
+sudo -u postgres psql -c "ALTER ROLE \"unifi-protect\" PASSWORD 'unifi-protect';"
+# /etc/postgresql/<major>/main/postgresql.conf: listen_addresses = '*'
+# /etc/postgresql/<major>/main/pg_hba.conf:
+#   hostssl unifi-protect unifi-protect <console-ip>/32 scram-sha-256
+sudo systemctl restart postgresql
+```
+
+The console runs its own schema migration. The default password is the real device's default;
+change it on both sides if the network is not isolated.
 
 ## Configure an instance
 

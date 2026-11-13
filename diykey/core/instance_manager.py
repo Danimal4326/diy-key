@@ -120,10 +120,13 @@ def list_instances():
 
 
 def _build_unit(entry):
+    # Older registry entries predate per-instance GUIDs; mint one and keep it stable.
+    entry.setdefault("guid", str(uuid.uuid4()))
     common_args = [
         "--iface", entry["iface"],
         "--mac", entry["mac"],
         "--device-id", entry["device_id"],
+        "--guid", entry["guid"],
         "--hostname", entry["hostname"],
         "--state-dir", entry["state_dir"],
     ]
@@ -159,7 +162,9 @@ def _build_unit(entry):
             # dhclient 4.4.3-P1 has no -H flag, so override DHCP option 12 via a
             # per-interface config file with `send host-name "...";` (-cf).
             dhclient_conf = os.path.join(entry["state_dir"], "dhclient.conf")
-            pre_lines.append(f"ExecStartPre=/usr/sbin/dhclient -pf {shlex.quote(pidfile)} "
+            # -1 waits for one lease attempt instead of daemonising before the address
+            # exists, which otherwise lets run_all resolve 0.0.0.0 on a cold boot.
+            pre_lines.append(f"ExecStartPre=/usr/sbin/dhclient -1 -pf {shlex.quote(pidfile)} "
                              f"-lf {shlex.quote(leases)} -cf {shlex.quote(dhclient_conf)} "
                              f"{shlex.quote(iface)}")
             post_lines = [
@@ -222,6 +227,10 @@ def refresh_instance(name):
     entry = reg.get(name)
     if not entry:
         raise InstanceError(f"no such instance {name!r}")
+    if not entry.get("guid"):
+        entry["guid"] = str(uuid.uuid4())
+        reg[name] = entry
+        _save_registry(reg)
     _write_and_start_unit(entry)
     _systemctl("restart", _unit_name(name))
     return {**entry, "name": name, "running": True}
@@ -273,6 +282,7 @@ def create_instance(name, parent_iface=None, ip=None, netmask=None, gateway=None
         "parent_iface": parent_iface,
         "mac": mac_clean,
         "device_id": str(device_id) if device_id else str(uuid.uuid4()),
+        "guid": str(uuid.uuid4()),
         "hostname": f"{cfg['hostname']}-{name}",
         "state_dir": state_dir,
         "netmode": netmode,
@@ -361,6 +371,7 @@ def register_physical_instance(name, iface, mac, device_id, hostname, state_dir)
         "mac": mac,
         "mac_display": _mac_with_colons(mac),
         "device_id": device_id,
+        "guid": str(uuid.uuid4()),
         "hostname": hostname,
         "state_dir": state_dir,
         "created": time.time(),

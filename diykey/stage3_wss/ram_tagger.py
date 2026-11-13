@@ -219,6 +219,7 @@ class RamPlus:
         self._lock = threading.Lock()
         self._session = None
         self._failed = False
+        self._failed_key = None
 
     def _load(self):
         import onnxruntime as ort
@@ -258,18 +259,29 @@ class RamPlus:
         finally:
             _prof_add("ramplus", t0)  # includes waiting for the lock (warm-up, scene memory)
 
+    def _key(self):
+        try:
+            return (self.model_path, os.path.getmtime(self.model_path))
+        except OSError:
+            return (self.model_path, None)
+
     def _tags(self, img_bgr):
         with self._lock:
             if self._failed:
-                return {}
+                if self._failed_key == self._key():
+                    return {}
+                # The model appeared or was replaced since the failure: retry once.
+                self._failed = False
+                self._session = None
             try:
                 if self._session is None:
                     self._load()
                 probs = self._session.run(None, {self._session.get_inputs()[0].name:
                                                  self._prep(img_bgr)})[0][0]
             except Exception as e:  # noqa: BLE001 -- RAM++ is an extra; COCO tags still go out
-                log.warning("RAM++ failed (%r); disabled", e)
+                log.warning("RAM++ failed (%r); disabled until the model changes", e)
                 self._failed = True
+                self._failed_key = self._key()
                 return {}
         hit = np.nonzero(self.keep & (probs > self.thresholds))[0]
         hit = hit[np.argsort(-probs[hit])][:self.max_tags]

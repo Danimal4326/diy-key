@@ -63,8 +63,9 @@ class TestBuildUnit(unittest.TestCase):
         self.assertIn("WorkingDirectory=" + instance_manager.PROJECT_DIR, unit)
         self.assertIn("ip link add link enP3p49s0 name dk-main "
                       "address FC:EC:DA:00:00:01 type macvlan mode bridge", unit)
-        self.assertIn("dhclient", unit)
+        self.assertIn("dhclient -1", unit)
         self.assertIn("-cf /srv/diy-key/instances/main/dhclient.conf", unit)
+        self.assertIn("--guid ", unit)
         self.assertIn("--state-dir /srv/diy-key/instances/main", unit)
         self.assertIn("--mac FCECDA000001", unit)
         self.assertIn("--device-id 11111111-2222-3333-4444-555555555555", unit)
@@ -74,6 +75,13 @@ class TestBuildUnit(unittest.TestCase):
         self.assertIn("RestartSec=5", unit)
         self.assertIn("KillMode=control-group", unit)
         self.assertIn("WantedBy=multi-user.target", unit)
+
+    def test_guid_is_minted_once_and_persisted(self):
+        e = entry()
+        first = instance_manager._build_unit(e)
+        second = instance_manager._build_unit(e)
+        self.assertIn(f"--guid {e['guid']}", first)
+        self.assertIn(f"--guid {e['guid']}", second)
 
     def test_static_unit_uses_prefix(self):
         unit = instance_manager._build_unit(entry(
@@ -230,6 +238,7 @@ class TestCreateIdentity(unittest.TestCase):
         self.assertTrue(e["mac"].startswith(instance_manager.config.UBNT_OUI))
         self.assertEqual(len(e["mac"]), 12)
         self.assertEqual(len(e["device_id"]), 36)  # uuid4
+        self.assertEqual(len(e["guid"]), 36)       # uuid4, per instance
         self.assertEqual(e["state_dir"],
                          os.path.join(instance_manager.INSTANCES_DIR, "two"))
 

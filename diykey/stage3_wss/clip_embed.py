@@ -35,6 +35,7 @@ MODEL_NAME = "clip-ViT-L-14"
 DIM = 768
 _lock = threading.Lock()
 _model = None
+_model_key = None
 
 
 OPEN_CLIP_NAME = "ViT-L-14-quickgelu"
@@ -93,11 +94,25 @@ def _load_fp16(open_clip, torch, device):
     return model, preprocess
 
 
+def _load_key():
+    path = fp16_weights_path()
+    try:
+        weights = os.path.getmtime(path) if os.path.exists(path) else None
+    except OSError:
+        weights = None
+    return (OPEN_CLIP_NAME, os.environ.get("DIYKEY_CLIP_FP16", "0"), weights)
+
+
 def _load():
     """(model, preprocess, tokenizer, device), or None when unavailable."""
-    global _model
+    global _model, _model_key
+    key = _load_key()
     with _lock:
+        if _model is False and _model_key != key:
+            # The FP16 weights appeared or changed, or the toggle moved: retry once.
+            _model = None
         if _model is None:
+            _model_key = key
             try:
                 import open_clip
                 import torch

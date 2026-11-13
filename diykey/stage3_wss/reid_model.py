@@ -159,25 +159,35 @@ def _build():
     return OSNetAIN()
 
 
+_loaded_key = None
+_load_lock = threading.Lock()
+
+
 def _load():
-    global _loaded
-    if _loaded is not None:
-        return _loaded
+    global _loaded, _loaded_key
     path = os.path.expanduser(os.environ.get("DIYKEY_REID_MODEL", "").strip())
-    try:
-        import torch
-        ckpt = torch.load(path, map_location="cpu", weights_only=True)
-        state = {k.removeprefix("module."): v for k, v in ckpt.get("state_dict", ckpt).items()
-                 if not k.removeprefix("module.").startswith("classifier")}
-        model = _build()
-        model.load_state_dict(state, strict=True)
-        device = "mps" if torch.backends.mps.is_available() else "cpu"
-        _loaded = (model.eval().to(device), device, torch)
-        log.info("re-ID: %s on %s", os.path.basename(path)[:32], device)
-    except Exception as e:  # noqa: BLE001 - detection carries on without re-ID vectors
-        log.warning("re-ID model %s failed to load: %r", path, e)
-        _loaded = False
-    return _loaded
+    key = (path, os.path.getmtime(path) if os.path.exists(path) else None)
+    with _load_lock:
+        if _loaded is False and _loaded_key != key:
+            _loaded = None
+        if _loaded is not None:
+            return _loaded
+        _loaded_key = key
+        try:
+            import torch
+            ckpt = torch.load(path, map_location="cpu", weights_only=True)
+            state = {k.removeprefix("module."): v
+                     for k, v in ckpt.get("state_dict", ckpt).items()
+                     if not k.removeprefix("module.").startswith("classifier")}
+            model = _build()
+            model.load_state_dict(state, strict=True)
+            device = "mps" if torch.backends.mps.is_available() else "cpu"
+            _loaded = (model.eval().to(device), device, torch)
+            log.info("re-ID: %s on %s", os.path.basename(path)[:32], device)
+        except Exception as e:  # noqa: BLE001 - detection carries on without re-ID vectors
+            log.warning("re-ID model %s failed to load: %r", path, e)
+            _loaded = False
+        return _loaded
 
 
 def embed_raw(img_bgr):

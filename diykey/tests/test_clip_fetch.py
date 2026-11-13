@@ -108,6 +108,25 @@ class TestClipFetch(unittest.TestCase):
         clip_fetch.prune(d, keep=1, min_age_s=1200)
         self.assertEqual(set(os.listdir(d)), {"recent.mp4", "newest.mp4"})
 
+    def test_prune_keeps_recent_image_dirs_and_cleans_deep_mode_crops(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        for name, age in (("old-images", 5000), ("new-images", 1)):
+            path = os.path.join(d, name)
+            os.makedirs(path)
+            os.utime(path, (time.time() - age, time.time() - age))
+        for rel, age in (("describe/old.jpg", 5000), ("describe/new.jpg", 1),
+                         ("embed/new.jpg", 1)):
+            path = os.path.join(d, rel)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            open(path, "wb").close()
+            os.utime(path, (time.time() - age, time.time() - age))
+        clip_fetch.prune(d, keep=1, min_age_s=1200)
+        self.assertFalse(os.path.exists(os.path.join(d, "old-images")))
+        self.assertTrue(os.path.exists(os.path.join(d, "new-images")))
+        self.assertFalse(os.path.exists(os.path.join(d, "describe", "old.jpg")))
+        self.assertTrue(os.path.exists(os.path.join(d, "embed", "new.jpg")))
+
     def _extract_past_the_end(self, last_frame_works):
         import subprocess
         from unittest import mock

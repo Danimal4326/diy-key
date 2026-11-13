@@ -186,7 +186,27 @@ def prune(clips_dir, keep=KEEP_EVENTS, min_age_s=None):
     except OSError:
         return
     for e in image_dirs[keep:]:
-        shutil.rmtree(e.path, ignore_errors=True)
+        try:
+            if time.time() - e.stat().st_mtime < min_age_s:
+                continue
+            shutil.rmtree(e.path, ignore_errors=True)
+        except OSError as err:
+            log.warning("could not prune %s: %r", e.path, err)
+    # Deep-mode describe and re-ID crops are not clips; prune them by the same age rule.
+    for sub in ("describe", "embed", "segment"):
+        directory = os.path.join(clips_dir, sub)
+        try:
+            files = sorted((e for e in os.scandir(directory) if e.is_file()),
+                           key=lambda e: e.stat().st_mtime, reverse=True)
+        except OSError:
+            continue
+        for e in files[keep:]:
+            try:
+                if time.time() - e.stat().st_mtime < min_age_s:
+                    continue
+                os.remove(e.path)
+            except OSError as err:
+                log.warning("could not prune %s: %r", e.path, err)
 
 
 def fetch_image(url, headers, cert, out_path):

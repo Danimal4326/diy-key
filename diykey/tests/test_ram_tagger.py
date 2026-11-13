@@ -135,6 +135,23 @@ class RamPlusTest(unittest.TestCase):
         self.assertEqual(plus.tags(np.zeros((8, 8, 3), np.uint8)), {})
         self.assertTrue(plus._failed)
 
+    def test_failure_retries_when_the_model_appears(self):
+        path = os.path.join(self.tmp.name, "ram_plus.onnx")
+        plus = ram_tagger.RamPlus(path)
+        plus.names, plus.max_tags = ["man"], 16
+        plus.thresholds = np.array([0.5], np.float32)
+        plus.keep = np.array([True])
+        with unittest.mock.patch.object(plus, "_load", side_effect=RuntimeError("boom")):
+            self.assertEqual(plus.tags(np.zeros((8, 8, 3), np.uint8)), {})
+        self.assertTrue(plus._failed)
+        session = unittest.mock.Mock()
+        session.get_inputs.return_value = [unittest.mock.Mock(name="input")]
+        session.run.return_value = [np.array([[0.8]])]
+        plus._load = unittest.mock.Mock(
+            side_effect=lambda: setattr(plus, "_session", session))
+        open(path, "wb").close()
+        self.assertEqual(plus.tags(np.zeros((8, 8, 3), np.uint8)), {"man": 0.8})
+
     def test_filter_by_object_type(self):
         tags = {"man": 0.9, "sedan": 0.8, "shirt": 0.7}
         self.assertEqual(set(ram_tagger.plus_filter(tags, "person")), {"man", "shirt"})

@@ -1,0 +1,5 @@
+# Find Anything / CLIP (stage3_wss/clip_embed.py), only with DIYKEY_CLIP=1.
+# Install on top of requirements.txt: pip install -r diykey/requirements-clip.txt
+torch>=2.4
+open_clip_torch>=2.24
+Pillow>=10

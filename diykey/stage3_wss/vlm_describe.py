@@ -136,6 +136,11 @@ def _mlx_backend(model_id):
 
 
 def _transformers_backend(model_path):
+    if os.geteuid() == 0 and os.environ.get("DIYKEY_ALLOW_ROOT_MODEL_CODE") != "1":
+        # The launchd daemon runs as root and the model directory is user-writable;
+        # trust_remote_code would execute user code as root. Refuse unless explicitly allowed.
+        raise RuntimeError("refusing trust_remote_code model code as root; "
+                           "set DIYKEY_ALLOW_ROOT_MODEL_CODE=1")
     import torch
     from transformers import AutoModel, AutoTokenizer
 
@@ -166,7 +171,11 @@ def _transformers_backend(model_path):
 
 
 def _get_backend(name, model):
-    key = (name, model)
+    try:
+        mtime = os.path.getmtime(model)
+    except OSError:
+        mtime = None
+    key = (name, model, mtime)
     if key in _loaded:
         return _loaded[key]
     if key in _failed:

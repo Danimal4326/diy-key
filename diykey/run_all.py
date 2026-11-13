@@ -68,6 +68,8 @@ def main():
                     help="adopt_state.json/server.crt/server.key directory; defaults to "
                          "stage1_http/ (keeps an already-adopted identity)")
     ap.add_argument("--device-id", default=cfg["device_id"])
+    ap.add_argument("--guid", default=cfg["guid"],
+                    help="per-instance X-Guid; the systemd unit passes the registry value")
     ap.add_argument("--skip-grpc", action="store_true",
                     help="skip the gRPC stage (also skipped when generated/ is empty)")
     args = ap.parse_args()
@@ -119,7 +121,7 @@ def main():
     http_args = stage("stage1_http/adopt_http.py", *identity, "--hostname", args.hostname,
                       "--device-id", args.device_id)
     wss_args = stage("stage3_wss/ucp4_client.py", *identity,
-                     "--device-id", args.device_id, "--guid", cfg["guid"])
+                     "--device-id", args.device_id, "--guid", args.guid)
     model_args = stage("stage4_modelserver/model_server.py", "--bind-ip", args.bind_ip)
     if fallback:
         wss_args += ["--fallback-host-port", fallback]

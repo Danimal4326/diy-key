@@ -63,8 +63,10 @@ check_not_running() {
 
 write_plist() {
     # The folders stay yours, or PostgreSQL (run as you) couldn't write its log.
-    mkdir -p "$(dirname "$LAUNCHD_LOG")"
-    chown "$USER_NAME:staff" "$USER_HOME/.diy-key" "$BASE" "$(dirname "$LAUNCHD_LOG")"
+    mkdir -p "$(dirname "$LAUNCHD_LOG")" "$BASE/state" "$BASE/logs" \
+        "$USER_HOME/.diy-key/models" "$USER_HOME/.cache/huggingface"
+    chown -R "$USER_NAME:staff" "$USER_HOME/.diy-key" "$BASE/state" "$BASE/logs" \
+        "$USER_HOME/.diy-key/models" "$USER_HOME/.cache/huggingface"
     # HOME: the CLIP weights (~/.cache/huggingface) and offered firmware (~/.diy-key/firmware)
     # stay where a terminal run keeps them, not under /var/root. No .pyc files: root's would
     # block a later run as you from replacing them.

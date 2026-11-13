@@ -1,0 +1,6 @@
+# NeXT AI Summary (stage3_wss/vlm_describe.py), only with DIYKEY_VLM=transformers.
+# Install on top of requirements.txt: pip install -r diykey/requirements-vlm.txt
+transformers>=5
+Pillow>=10
+# On Apple Silicon the mlx backend is tested with:
+# mlx-vlm==0.7.12

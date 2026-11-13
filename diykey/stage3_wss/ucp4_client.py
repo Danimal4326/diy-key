@@ -504,6 +504,10 @@ def _task_worker(q):
         if stale:
             log.warning("%s task waited %.0fs (> DIYKEY_TASK_DROP_AGE_S=%.0f); dropped",
                         kind, age, drop_age)
+            if kind == "recognizeKeyFrames" and len(args) > 3 and hasattr(args[3], "cancel"):
+                args[3].cancel()
+                if STATE_DIR:
+                    clip_fetch.prune(os.path.join(STATE_DIR, "clips"))
             continue
         _task_ctx.wait_ms = age * 1000
         try:
@@ -765,12 +769,14 @@ def handle_action(head, body, device_info):
         # has entries for them (same gates as _handle_recognize).
         wanted = _wanted_metas(body or {})
         extra = tuple(g for g in ("face", "lpr") if g in wanted)
-        fetch = _start_prefetch(device_info["console_host"], device_info["mac_nosep"], body)
-        if not _submit_task("recognizeKeyFrames", _handle_recognize,
-                            (device_info["console_host"], device_info["mac_nosep"], body,
-                             fetch), ram=True,
-                            **({"extra_groups": extra} if extra else {})) and fetch:
-            fetch.cancel()
+        fetch = _Prefetch()
+        if _submit_task("recognizeKeyFrames", _handle_recognize,
+                        (device_info["console_host"], device_info["mac_nosep"], body, fetch),
+                        ram=True, **({"extra_groups": extra} if extra else {})):
+            # Only download once the queue has accepted the task; a full queue or a
+            # later stale drop must not spend a fetch on work that will be discarded.
+            fetch.start(_start_prefetch(device_info["console_host"],
+                                        device_info["mac_nosep"], body))
     elif action == "fastReverification":
         # Second Stage Verification from per-thumbnail JPEGs (or a clip when Protect falls
         # back), aikey-fw 2.2.8 syswrapper.sh:3324-3640. Same queue as the other model work.
@@ -1228,6 +1234,32 @@ def _fetch_media(console_host, mac_nosep, body):
 
 
 _prefetch_pool = None
+
+
+class _Prefetch:
+    """A prefetch future that only starts after the task queue admits the task."""
+
+    def __init__(self):
+        self.future = None
+        self.cancelled = False
+        self.ready = threading.Event()
+
+    def start(self, future):
+        if self.cancelled:
+            if future is not None:
+                future.cancel()
+            return
+        self.future = future
+        self.ready.set()
+
+    def result(self):
+        self.ready.wait()
+        return self.future.result() if self.future is not None else None
+
+    def cancel(self):
+        self.cancelled = True
+        if self.future is not None:
+            self.future.cancel()
 
 
 def _start_prefetch(console_host, mac_nosep, body):

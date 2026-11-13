@@ -897,14 +897,23 @@ class TestPrefetch(_RecognizeTest):
         with mock.patch.dict(os.environ, {"DIYKEY_PREFETCH_WORKERS": "0"}):
             self.assertIsNone(ucp4_client._start_prefetch("h", "m", self._body()))
 
-    def test_dispatch_hands_the_prefetch_to_the_task_and_cancels_when_dropped(self):
-        fut = mock.Mock()
-        with mock.patch.object(ucp4_client, "_start_prefetch", return_value=fut), \
+    def test_full_queue_does_not_start_a_prefetch(self):
+        with mock.patch.object(ucp4_client, "_start_prefetch") as start, \
                 mock.patch.object(ucp4_client, "_submit_task", return_value=False) as submit:
             ucp4_client.handle_action({"action": "recognizeKeyFrames"}, self._body(),
                                       {"console_host": "h", "mac_nosep": "m"})
-        self.assertIs(submit.call_args.args[2][3], fut)
-        fut.cancel.assert_called_once()
+        start.assert_not_called()
+        self.assertIsInstance(submit.call_args.args[2][3], ucp4_client._Prefetch)
+
+    def test_admitted_task_starts_the_prefetch(self):
+        fut = mock.Mock()
+        with mock.patch.object(ucp4_client, "_start_prefetch", return_value=fut) as start, \
+                mock.patch.object(ucp4_client, "_submit_task", return_value=True) as submit:
+            ucp4_client.handle_action({"action": "recognizeKeyFrames"}, self._body(),
+                                      {"console_host": "h", "mac_nosep": "m"})
+        start.assert_called_once()
+        holder = submit.call_args.args[2][3]
+        self.assertIs(holder.result(), fut.result())
 
 
 class TestSummaryQueue(_RecognizeTest):

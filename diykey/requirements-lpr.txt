@@ -1,0 +1,3 @@
+# Licence plates (stage3_wss/lpr.py), only with DIYKEY_LPR=1.
+# Install on top of requirements.txt: pip install -r diykey/requirements-lpr.txt
+fast-alpr

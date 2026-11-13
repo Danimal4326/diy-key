@@ -37,6 +37,10 @@ git clone https://github.com/hutchx86/diy-key && cd diy-key
 sudo apt-get install -y python3-venv openssl
 python3 -m venv ~/diykey-venv && . ~/diykey-venv/bin/activate
 pip install -r diykey/requirements.txt
+# Optional, only for the features you enable:
+# pip install -r diykey/requirements-clip.txt   # DIYKEY_CLIP
+# pip install -r diykey/requirements-lpr.txt    # DIYKEY_LPR
+# pip install -r diykey/requirements-vlm.txt    # DIYKEY_VLM=transformers
 
 cd diykey
 sudo ~/diykey-venv/bin/python run_all.py --iface <your-interface>

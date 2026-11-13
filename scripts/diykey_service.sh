@@ -62,7 +62,18 @@ load_settings() {
 
 # PostgreSQL refuses to run as root: under the daemon it runs as the owner of its cluster.
 pg_ctl() {
-    local bin=${DIYKEY_PG_BIN:-/opt/homebrew/opt/postgresql@17/bin}/pg_ctl
+    local default_bin=/opt/homebrew/opt/postgresql@17/bin
+    local bin=${DIYKEY_PG_BIN:-$default_bin}/pg_ctl
+    if [ "$(id -u)" -eq 0 ] && [ -n "${DIYKEY_PG_BIN:-}" ] && [ "$DIYKEY_PG_BIN" != "$default_bin" ]; then
+        # A user-writable env file must not point a root daemon at arbitrary code.
+        local owner mode
+        owner=$(stat -f %Su "$bin" 2>/dev/null || echo missing)
+        mode=$(stat -f %Lp "$bin" 2>/dev/null || echo 777)
+        if [ "$owner" != root ] || [ $((8#$mode & 8#022)) -ne 0 ]; then
+            echo "diykey_service: refusing root-executed DIYKEY_PG_BIN=$bin (owner=$owner mode=$mode)" >&2
+            return 1
+        fi
+    fi
     if [ "$(id -u)" -eq 0 ]; then
         sudo -u "$(stat -f %Su "$PG_DIR")" env LC_ALL=en_US.UTF-8 "$bin" "$@"
     else
@@ -142,6 +153,11 @@ while true; do
         unset DIYKEY_PG_SOCKET DIYKEY_PG_USER
     fi
     stop_stale
+    if [ "$(id -u)" -eq 0 ] && [ -n "${SUDO_USER:-}" ]; then
+        # Root-created state and logs must not block a later run as the user.
+        chown -R "$SUDO_USER":staff "$BASE/state" "$BASE/logs" \
+            "$USER_HOME/.diy-key/models" 2>/dev/null || true
+    fi
     seen=$(mtime "$TRIGGER")
     echo "diykey_service: starting DIY-Key '$INSTANCE' at $(date '+%F %T') (settings from $ENV_FILE)"
     bind=()

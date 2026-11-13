@@ -133,11 +133,26 @@ class _Models:
         self._yunet = None
         self._sface = None
         self._failed = False
+        self._failed_key = None
+
+    def _key(self):
+        d = model_dir()
+
+        def mtime(name):
+            try:
+                return os.path.getmtime(os.path.join(d, name))
+            except OSError:
+                return None
+
+        return (d, mtime(YUNET_FILE), mtime(SFACE_FILE))
 
     def infer_fn(self):
         """The default infer callable, or None (logged once) without cv2 or the models."""
         if self._failed:
-            return None
+            if self._failed_key == self._key():
+                return None
+            self._failed = False
+            self._yunet = self._sface = None
         with self._lock:
             if self._yunet is None:
                 try:
@@ -152,8 +167,10 @@ class _Models:
                     self._sface = cv2.FaceRecognizerSF.create(sface_path, "")
                 except Exception as e:
                     self._failed = True
-                    log.warning("face recognition disabled (set DIYKEY_FACE_MODELS to a dir "
-                                "with %s and %s): %s", YUNET_FILE, SFACE_FILE, e)
+                    self._failed_key = self._key()
+                    log.warning("face recognition disabled until the models change (set "
+                                "DIYKEY_FACE_MODELS to a dir with %s and %s): %s",
+                                YUNET_FILE, SFACE_FILE, e)
                     return None
         return self._infer
 

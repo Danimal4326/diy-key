@@ -93,9 +93,11 @@ sudo apt-get install -y python3-pip python3-venv openssl
 python3 -m venv ~/diykey-venv
 source ~/diykey-venv/bin/activate
 pip install -r requirements.txt
+# Optional: requirements-clip.txt (DIYKEY_CLIP), requirements-lpr.txt (DIYKEY_LPR),
+# requirements-vlm.txt (DIYKEY_VLM=transformers).
 
 # The committed generated bindings need grpcio>=1.83.1 / protobuf>=7.35.1
-# (requirements.txt pins them). Regenerate only if the .proto files change:
+# (requirements-dev.txt pins them). Regenerate only if the .proto files change:
 bash stage2_grpc/generate_pb2.sh
 
 # Review diykey.cfg (identity, console host) and run everything. Needs root for
