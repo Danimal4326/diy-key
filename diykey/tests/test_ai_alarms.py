@@ -2,6 +2,7 @@
 """AI Key Advanced alarms: the tags nl_search gives a rule sentence and the tags ram_tagger
 gives an object must be names Protect keeps and must overlap, and the stored embedding is
 scored with Protect's own formula (M/718745_aiprocessors.js)."""
+import datetime
 import os
 import sys
 import tempfile
@@ -214,10 +215,6 @@ class TestAdvancedAlarmGaps(unittest.TestCase):
                           "DIYKEY_NL_SEARCH (set to 0)"])
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class TestCanonicalWords(_VocabCase):
     """Plural fallback and the firmware word linker (DIYKEY_WORD_LINKER)."""
 
@@ -286,6 +283,52 @@ class TestAnimalObjectType(_VocabCase):
 
     def test_non_animal_unchanged(self):
         self.assertIsNone(nl_search._object_type("boxes"))
+
+
+class TestTimePhrases(unittest.TestCase):
+    def setUp(self):
+        self._saved = nl_search._vocab
+        nl_search._vocab = {"car", "vehicle", "person", "police car", "dog", "animal"}
+
+    def tearDown(self):
+        nl_search._vocab = self._saved
+
+    def _parse(self, query, hour=9, minute=30):
+        return nl_search.parse(query, now=datetime.datetime(2026, 11, 13, hour, minute))
+
+    def test_relative_duration_without_a_number(self):
+        reply = self._parse("last hour")
+        self.assertEqual(reply["timeTag"], "last hour")
+        self.assertEqual(reply["endTime"] - reply["startTime"], 3600000)
+
+    def test_tonight_is_forward_before_evening(self):
+        reply = self._parse("tonight", 9)
+        self.assertLess(reply["startTime"], reply["endTime"])
+        self.assertEqual(reply["startTime"],
+                         int(datetime.datetime(2026, 11, 13, 18, 0).timestamp() * 1000))
+
+    def test_tonight_ends_now_after_evening(self):
+        reply = self._parse("tonight", 22, 0)
+        self.assertEqual(reply["endTime"],
+                         int(datetime.datetime(2026, 11, 13, 22, 0).timestamp() * 1000))
+
+    def test_last_night_does_not_end_in_the_future(self):
+        reply = self._parse("last night", 3, 0)
+        self.assertEqual(reply["endTime"],
+                         int(datetime.datetime(2026, 11, 13, 3, 0).timestamp() * 1000))
+
+    def test_time_only_query_is_not_exact(self):
+        reply = self._parse("last night")
+        self.assertEqual(reply["keyTags"], [])
+        self.assertFalse(reply["exact_match"])
+
+    def test_punctuation_does_not_break_exact(self):
+        self.assertTrue(self._parse("person,")["exact_match"])
+
+    def test_plural_object_phrase(self):
+        reply = self._parse("police cars")
+        tags = {tag for key in reply["keyTags"] for tag in key["tags"]}
+        self.assertIn("police car", tags)
 
 
 if __name__ == "__main__":

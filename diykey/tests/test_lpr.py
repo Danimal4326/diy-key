@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Unit tests for stage3_wss/lpr.py with a mocked plate reader (no fast-alpr needed)."""
+import importlib.util
 import os
 import sys
 import unittest
@@ -14,6 +15,8 @@ for p in (_ROOT, os.path.join(_ROOT, "stage3_wss")):
         sys.path.insert(0, p)
 
 import lpr  # noqa: E402
+
+HAS_CV2 = importlib.util.find_spec("cv2") is not None
 
 
 def _frame(bgr=(0, 0, 200)):
@@ -50,6 +53,7 @@ def check_descriptor(tc, d):
 
 
 class BuildLprTest(unittest.TestCase):
+    @unittest.skipUnless(HAS_CV2, "opencv not installed")
     def test_schema(self):
         frames = {1000: _frame()}
         out = lpr.build_lpr("cam1", "ev1", frames, [_meta(1000, 7)], start_ms=1_700_000_000_000,
@@ -127,6 +131,16 @@ class BuildLprTest(unittest.TestCase):
                 self.assertIsNone(lpr.build_lpr("c", "e", {1: _frame()},
                                                 [_meta(1, 7, obj=obj)],
                                                 reader=_reader([[("ABC123", 0.9, BOX)]])))
+
+    def test_vehicle_type_and_colour_from_roi_attributes(self):
+        m = _meta(1, 3)
+        m["roi"]["attributes"] = {"vehicleType": {"val": "suv", "confidence": 88},
+                                  "color": {"val": "silver", "confidence": 95}}
+        j, _ = lpr.build_lpr("c", "e", {1: _frame()}, [m],
+                             reader=_reader([[("SUV001", 0.9, BOX)]]))
+        attrs = j["lprAttrs"]["3"]
+        self.assertEqual(attrs["vehicleType"], {"val": "suv", "confidence": 88})
+        self.assertEqual(attrs["color"], {"val": "gray", "confidence": 95})  # silver -> gray
 
     def test_vehicle_type_from_label(self):
         m = _meta(1, 3)

@@ -21,6 +21,14 @@ from core import config  # noqa: E402
 log = logging.getLogger("model-server")
 
 
+def _rois(entry):
+    """roi is one object in Protect's schema but a list on some paths."""
+    roi = entry.get("roi")
+    if isinstance(roi, dict):
+        return [roi]
+    return [r for r in roi or () if isinstance(r, dict)]
+
+
 def _second_verifier_result(params: dict) -> dict:
     """Placeholder result in the CONFIRMED shape (see module docstring),
     keeping every claimed ROI's detector class as-is (modelRunStatus
@@ -28,11 +36,12 @@ def _second_verifier_result(params: dict) -> dict:
     rows = []
     for entry in params.get("thumbnailMeta") or []:
         ts = entry.get("ts")
-        for roi in entry.get("roi", []):
+        for roi in _rois(entry):
             object_type = str(roi.get("objectType") or "").lower()
+            tracker = roi.get("trackerID", roi.get("trackerId"))
             rows.append({
                 "thumbnailMs": ts,
-                "trackerID": roi.get("trackerID", roi.get("trackerId", "")),
+                "trackerID": int(tracker) if tracker is not None else -1,
                 "objectType": object_type,
                 "isValidDetection": True,
                 "detectedAs": object_type,

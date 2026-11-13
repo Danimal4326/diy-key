@@ -56,8 +56,11 @@ def _roi_derived_metas(body):
             otype = r.get("objectType") or (r.get("attributes") or {}).get("objectType")
             if otype in types and r.get("coord") is not None:
                 tid = r.get("trackerId", r.get("trackerID"))
-                found.append({"ts": e["ts"], "roi": {"coord": r["coord"], "objectType": otype,
-                                                     "trackerId": tid}})
+                roi = {"coord": r["coord"], "objectType": otype, "trackerId": tid}
+                for key in ("attributes", "confidence", "label"):
+                    if r.get(key) is not None:
+                        roi[key] = r[key]
+                found.append({"ts": e["ts"], "roi": roi})
         if found:
             out[kind] = found
     if out:

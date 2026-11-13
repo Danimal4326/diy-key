@@ -292,7 +292,8 @@ def _nl_search_reply(head, body, device_info):
         if action == "IMAGE_SEARCH":
             import cv2
             import numpy as np
-            resp = requests.get(body.get("imgUri") or "", headers=_callback_headers(
+            url = _abs_url(device_info["console_host"], body.get("imgUri") or "")
+            resp = requests.get(url, headers=_callback_headers(
                 device_info["mac_nosep"]), cert=(CERT_PATH, KEY_PATH), verify=False, timeout=30)
             img = cv2.imdecode(np.frombuffer(resp.content, np.uint8), cv2.IMREAD_COLOR) \
                 if resp.status_code == 200 else None
@@ -395,6 +396,27 @@ def ai_setting_enabled(name, default=False):
     Protect has sent it; it does so on every connect (M/738405:27-42)."""
     value = _ai_settings.get(name)
     return default if value is None else bool(value)
+
+
+# Fixed TOPS per feature, as the real AIKeyG1 reports in systemMetrics.aiFeatureMetrics
+# (protocol.md §3, aikey_monitor.py calculate_ai_feature_metrics). ai-summary is always on;
+# the others follow changeAiInferAgentSettings.
+AI_FEATURE_TOPS = {
+    "person-reverification": (1.1, "enableRAM"),
+    "vehicle-reverification": (1.1, "enableRAM"),
+    "animal-reverification": (1.1, "enableRAM"),
+    "object-indexing": (7.5, "enableRAM"),
+    "ai-summary": (12.5, None),
+    "speech-to-text": (2.5, "enableSTT"),
+    "lpr-legacy": (1.2, "enableLprRecognize"),
+    "face-id-legacy": (1.5, "enableFaceRecognize"),
+}
+
+
+def _ai_feature_metrics():
+    """Record<string, number> of TOPS per enabled feature, or {} when none applies."""
+    return {name: tops for name, (tops, flag) in AI_FEATURE_TOPS.items()
+            if flag is None or ai_setting_enabled(flag)}
 
 
 # recognizeKeyFrames/RequestAI run on a small worker pool instead of a thread each: a burst
@@ -683,7 +705,11 @@ def handle_action(head, body, device_info):
             {"name": "Memory", "value": round(ram_used, 4)},
         ]
         log.info("systemMetrics -> %s", metrics)
-        return {"systemMetrics": metrics}
+        reply = {"systemMetrics": metrics}
+        ai_metrics = _ai_feature_metrics()
+        if ai_metrics:
+            reply["aiFeatureMetrics"] = ai_metrics
+        return reply
     if action == "getTaskQueueInfo":
         # CONFIRMED schema: six numeric counters. `{}` fails validation silently on every
         # ~5 s poll (Protect M/691057:234-240). UI_TASK_NUM is what this key really holds
@@ -1683,9 +1709,8 @@ def _handle_describe(console_host, mac_nosep, task_body):
     (/internal/aiprocessors/descriptions/<taskId>, schema M/761379:420-466). An empty
     description is how a failure is reported: saveDescriptions then logs "leaving session for
     retry" and completes the task instead of waiting out the 30 s timeout (M/402297:42-52).
-    descEmbedding is the CLIP text embedding of the description, only with DIYKEY_CLIP=1 and
-    DIYKEY_DESC_EMBED=1: Protect's column dimension for it is not in M (CLIP here is
-    768-d, the same space nl_search queries use), so a mismatch would reject saves; unverified."""
+    descEmbedding fills smartDetectSessionsSearch.descEmbedding vector(384) (protocol.md §6),
+    so it is sent only when the embedder returns 384 values; CLIP is 768-d and is omitted."""
     payload = (task_body or {}).get("payload") or {}
     res_url = (task_body or {}).get("resUrl")
     body = {"camera": payload.get("camera"), "event": payload.get("event"),
@@ -1707,8 +1732,12 @@ def _handle_describe(console_host, mac_nosep, task_body):
                 body["labels"] = labels
             if clip_embed.enabled() and _truthy(os.environ.get("DIYKEY_DESC_EMBED")):
                 vec = clip_embed.text_embed(text)
-                if vec:
+                if vec and len(vec) == 384:
                     body["descEmbedding"] = vec
+                elif vec:
+                    log.warning("DIYKEY_DESC_EMBED: %d-d vector cannot fill "
+                                "smartDetectSessionsSearch.descEmbedding (384); omitting",
+                                len(vec))
     url = _abs_url(console_host, res_url)
     try:
         resp = requests.post(url, headers=_callback_headers(mac_nosep), json=body,
@@ -2043,7 +2072,7 @@ def _watch_for_reconnect(ws, this_connection_token, stop_event, poll_interval=2.
 
 
 def run(host: str, port: int, token: str, send_token_header: bool, device_info: dict,
-        adopted: bool = True):
+        adopted: bool = True, connected: threading.Event = None):
     device_info = {**device_info, "console_host": host}
     url = f"wss://{host}:{port}/"
     headers = {
@@ -2072,6 +2101,8 @@ def run(host: str, port: int, token: str, send_token_header: bool, device_info: 
     with connect(url, subprotocols=["ucp4"], additional_headers=headers,
                  ssl=ctx, open_timeout=15, **extra) as ws:
         log.info("WSS CONNECTED (subprotocol=%s)", ws.subprotocol)
+        if connected is not None:
+            connected.set()  # the console has seen the token (or pinned fingerprint)
         device_info["ws"] = ws  # this connection's copy; updateFirmware closes it to "reboot"
 
         stop_watch = threading.Event()
@@ -2297,14 +2328,14 @@ def main():
             continue
 
         send_token = token is not None and token not in used_tokens
-        if token is not None:
-            used_tokens.add(token)
         if token is not None and not send_token:
             log.info("token already used on a prior connection -- reconnecting tokenless "
                      "(fingerprint should already be pinned)")
         _reset_pending.clear()
+        connected = threading.Event()
         try:
-            run(host, port, token, send_token, device_info, adopted=adopted)
+            run(host, port, token, send_token, device_info, adopted=adopted,
+                connected=connected)
             if not config.is_adopted(STATE_DIR):
                 log.info("ucp4 connection closed after factory reset; waiting for a fresh adopt POST")
                 continue
@@ -2318,6 +2349,11 @@ def main():
             log.warning("connection ended: %r -- reconnecting in %ds", e, backoff)
             time.sleep(backoff)
             backoff = min(backoff * 2, 30)
+        finally:
+            # Burn the token only after the console accepted the connection; a failed
+            # first connect must retry with the same token (protocol.md §3).
+            if token is not None and connected.is_set():
+                used_tokens.add(token)
 
 
 if __name__ == "__main__":

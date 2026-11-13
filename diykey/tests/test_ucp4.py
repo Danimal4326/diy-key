@@ -22,6 +22,10 @@ for p in (_ROOT, os.path.join(_ROOT, "stage3_wss")):
 import ucp4_client  # noqa: E402
 from core import config  # noqa: E402
 
+# The service environment must not leak into tests; each test sets what it needs.
+for _key in [k for k in os.environ if k.startswith("DIYKEY_")]:
+    os.environ.pop(_key, None)
+
 
 class TestPackRecord(unittest.TestCase):
     def test_header_shape(self):
@@ -256,7 +260,7 @@ class TestHandleAction(_StateDirTest):
         env = {"DIYKEY_FACE": "1"}
         ucp4_client._ai_settings.update(enableFaceRecognize=True)
         self.addCleanup(ucp4_client._ai_settings.clear)
-        with mock.patch.dict(os.environ, env), mock.patch.object(ucp4_client, "_submit_task", submit):
+        with mock.patch.dict(os.environ, env or {}), mock.patch.object(ucp4_client, "_submit_task", submit):
             ucp4_client.handle_action({"action": "recognizeKeyFrames"}, body,
                                       {"console_host": "h", "mac_nosep": "m"})
         self.assertEqual(submit.call_args.kwargs["extra_groups"], ("face",))
@@ -275,6 +279,20 @@ class TestHandleAction(_StateDirTest):
         for item in reply["systemMetrics"]:
             self.assertEqual(set(item), {"name", "value"})
             self.assertIsInstance(item["value"], (int, float))
+
+    def test_system_metrics_ai_feature_tops(self):
+        raw = {"cpu": {"load": 10.0}, "gpu": {"load": 0.0},
+               "ram": {"totalKilobytes": 1000, "availableKilobytes": 500}}
+        ucp4_client._ai_settings.update({"enableRAM": True, "enableSTT": False,
+                                         "enableLprRecognize": True,
+                                         "enableFaceRecognize": False})
+        self.addCleanup(ucp4_client._ai_settings.clear)
+        with mock.patch.object(ucp4_client, "collect_system_metrics", return_value=raw):
+            reply = self._call("systemMetrics")
+        self.assertEqual(reply["aiFeatureMetrics"], {
+            "person-reverification": 1.1, "vehicle-reverification": 1.1,
+            "animal-reverification": 1.1, "object-indexing": 7.5,
+            "ai-summary": 12.5, "lpr-legacy": 1.2})
 
     def test_system_metrics_are_fractions(self):
         # Firmware jtop_systemMetrics.py sends load/100; Protect compares PsqlUsage to 0.8.
@@ -899,7 +917,7 @@ class TestWarmModels(unittest.TestCase):
         step = lambda name: mock.Mock(side_effect=lambda *a: order.append(name))
         c = ucp4_client
         infer = step("face")
-        with mock.patch.dict(os.environ, env), \
+        with mock.patch.dict(os.environ, env or {}), \
                 mock.patch.object(c.clip_embed, "enabled", return_value=on), \
                 mock.patch.object(c.clip_embed, "text_embed", step("clip")), \
                 mock.patch.object(c.clip_embed, "label_matrix", step("labels")), \
@@ -1023,9 +1041,11 @@ class TestRecognizeFaceLpr(_RecognizeTest):
             self._run(self._roi_body(), self.ON, self.BOTH)
         self.assertTrue(any("derived 1 person / 1 vehicle" in m for m in cm.output))
         self.assertEqual(self.face.call_args.args[3],
-                         [{"ts": self.START + 2500, "roi": {"coord": [1, 2, 3, 4],
-                                                            "objectType": "person",
-                                                            "trackerId": 5}}])
+                         [{"ts": self.START + 2500,
+                           "roi": {"coord": [1, 2, 3, 4], "objectType": "person",
+                                   "trackerId": 5,
+                                   "attributes": {"objectType": "person"},
+                                   "confidence": 90}}])
         self.assertEqual(self.lpr.call_args.args[3][0]["roi"]["objectType"], "car")
 
     def test_roi_meta_ignored_for_plain_video(self):
@@ -1365,7 +1385,7 @@ class TestEnhanceImage(_StateDirTest):
 
         post = mock.Mock(return_value=mock.Mock(status_code=200, text='{"bytes":3}'))
         self.enhance = mock.Mock(return_value=b"new")
-        with mock.patch.dict(os.environ, env), \
+        with mock.patch.dict(os.environ, env or {}), \
                 mock.patch.object(ucp4_client.clip_fetch, "fetch_image", fetch), \
                 mock.patch.object(ucp4_client.face_enhance, "enhance", self.enhance), \
                 mock.patch.object(ucp4_client.requests, "post", post):
@@ -1456,7 +1476,7 @@ class TestOnDemandSummary(_StateDirTest):
 
         post = mock.Mock(return_value=mock.Mock(status_code=200, text="{}"))
         self.fetch = mock.Mock(return_value="/x.mp4")
-        with mock.patch.dict(os.environ, env), \
+        with mock.patch.dict(os.environ, env or {}), \
                 mock.patch.object(ucp4_client.clip_fetch, "fetch_clip", self.fetch), \
                 mock.patch.object(ucp4_client.clip_fetch, "extract_frames", extract), \
                 mock.patch.object(ucp4_client.clip_fetch, "prune", mock.Mock()), \
@@ -1621,7 +1641,7 @@ class TestEnhanceImageGroup(_StateDirTest):
             return path
 
         post = mock.Mock(return_value=mock.Mock(status_code=200, text="{}"))
-        with mock.patch.dict(os.environ, env), \
+        with mock.patch.dict(os.environ, env or {}), \
                 mock.patch.object(ucp4_client.clip_fetch, "fetch_image", fetch), \
                 mock.patch.object(ucp4_client.face_enhance, "enhance",
                                   mock.Mock(return_value=b"new")), \
@@ -1712,12 +1732,17 @@ class TestDeepDescribe(_StateDirTest):
 
     def test_desc_embedding_needs_clip_and_opt_in(self):
         env = {"DIYKEY_CLIP": "1", "DIYKEY_DESC_EMBED": "1"}
-        self.assertEqual(self._run(env=env, vec=[0.5, 0.5]).call_args.kwargs["json"]
-                         ["descEmbedding"], [0.5, 0.5])
+        self.assertEqual(self._run(env=env, vec=[0.5] * 384).call_args.kwargs["json"]
+                         ["descEmbedding"], [0.5] * 384)
         self.assertNotIn("descEmbedding", self._run(env={"DIYKEY_CLIP": "1"},
                                                     vec=[1.0]).call_args.kwargs["json"])
         self.assertNotIn("descEmbedding", self._run(env={"DIYKEY_DESC_EMBED": "1"},
                                                     vec=[1.0]).call_args.kwargs["json"])
+
+    def test_desc_embedding_wrong_dimension_is_omitted(self):
+        env = {"DIYKEY_CLIP": "1", "DIYKEY_DESC_EMBED": "1"}
+        body = self._run(env=env, vec=[0.5] * 768).call_args.kwargs["json"]
+        self.assertNotIn("descEmbedding", body)
 
     def test_images_variant_and_failure_reports_empty_description(self):
         task = {**self.TASK, "payload": {"camera": "cam1", "event": "ev1", "pass": "open",
@@ -1849,6 +1874,21 @@ class TestRequestAiUrl(unittest.TestCase):
                 "fec", "10.0.0.5"))
         self.assertEqual(fetch.call_args.args[0],
                          "https://10.0.0.5:7444/internal/x?start=1&format=mp4")
+
+
+class TestNlSearchReply(unittest.TestCase):
+    def test_image_search_absolutises_img_uri(self):
+        resp = mock.Mock(status_code=200, content=b"")
+        device = {"mac_nosep": "fec", "console_host": "10.0.0.5"}
+        with mock.patch.object(ucp4_client.requests, "get", return_value=resp) as get, \
+                mock.patch.object(ucp4_client.nl_search, "image_search",
+                                  return_value={"imgEmbed": []}), \
+                mock.patch("cv2.imdecode", return_value=None):
+            reply = ucp4_client._nl_search_reply(
+                {"action": "IMAGE_SEARCH"}, {"imgUri": "/internal/image/i1"}, device)
+        self.assertEqual(reply, {"imgEmbed": []})
+        self.assertEqual(get.call_args.args[0],
+                         "https://10.0.0.5:7444/internal/image/i1")
 
 
 if __name__ == "__main__":

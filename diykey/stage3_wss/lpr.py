@@ -113,14 +113,24 @@ def dominant_color(frame_rgb, coord):
     return str(values[i]), int(round(100 * counts[i] / counts.sum()))
 
 
-def vehicle_attributes(label, frame_rgb, coord):
+def vehicle_attributes(label, frame_rgb, coord, roi_attrs=None):
     """{vehicleType?, color?} as {val, confidence}, or None. Confidence is 0-100 as in
-    pi-port's descriptor attributes (scale there came from the Protect decompile)."""
+    pi-port's descriptor attributes (scale there came from the Protect decompile). A camera
+    vehicleType/color in the ROI wins over the detector label and the colour heuristic."""
+    roi_attrs = roi_attrs or {}
     attrs = {}
-    vtype = VEHICLE_TYPES.get((label or "").strip())
+    vt = roi_attrs.get("vehicleType") or {}
+    vtype = vt.get("val") or VEHICLE_TYPES.get((label or "").strip())
     if vtype:
-        attrs["vehicleType"] = {"val": vtype, "confidence": 70}
-    if frame_rgb is not None:
+        attrs["vehicleType"] = {"val": str(vtype).lower(),
+                                "confidence": vt.get("confidence", 70)}
+    color_attr = roi_attrs.get("color") or {}
+    if color_attr.get("val"):
+        name = COLOR_ALIASES.get(str(color_attr["val"]).lower(), str(color_attr["val"]).lower())
+        if name in PROTECT_COLORS:
+            attrs["color"] = {"val": name,
+                              "confidence": color_attr.get("confidence", 70)}
+    elif frame_rgb is not None:
         color = dominant_color(frame_rgb, coord)
         if color:
             name = COLOR_ALIASES.get(color[0], color[0])
@@ -280,7 +290,9 @@ def build_lpr(camera_id, event_id, frames, vehicle_meta, start_ms=None, reader=N
             if tid not in best or conf > best[tid]["conf"]:
                 ox, oy = _crop_origin(frame, coord, CROP_MARGIN)
                 best[tid] = {"text": text, "conf": conf, "ts": ts, "coord": coord,
-                             "frame": frame, "box_px": (ox + x1, oy + y1, ox + x2, oy + y2), "label": roi.get("label") or m.get("label"),
+                             "frame": frame, "box_px": (ox + x1, oy + y1, ox + x2, oy + y2),
+                             "label": roi.get("label") or m.get("label"),
+                             "attrs": roi.get("attributes") or {},
                              "plate": crop[max(0, y1):y2, max(0, x1):x2]}
     if not best:
         return None
@@ -300,7 +312,7 @@ def build_lpr(camera_id, event_id, frames, vehicle_meta, start_ms=None, reader=N
             # fast-alpr score would read as ~1% there. No Protect code compares it.
             "topKCandidate": [{"name": t, "confidence": round(100 * c, 1)} for t, c in top],
         }
-        va = vehicle_attributes(b["label"], b["frame"][..., ::-1], b["coord"])
+        va = vehicle_attributes(b["label"], b["frame"][..., ::-1], b["coord"], b["attrs"])
         if va:
             entry.update(va)
         attrs[str(tid)] = entry

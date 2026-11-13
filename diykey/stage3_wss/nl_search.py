@@ -189,19 +189,25 @@ def _time_range(text, now=None):
     now = now or datetime.datetime.now()
     day = now.replace(hour=0, minute=0, second=0, microsecond=0)
     ms = lambda d: int(d.timestamp() * 1000)  # noqa: E731
-    m = re.search(r"\b(?:in the )?(?:last|past) (\d+) (minute|hour|day|week)s?\b", text)
+    m = re.search(r"\b(?:in the )?(?:last|past) (?:(\d+) )?(minute|hour|day|week)s?\b", text)
     if m:
-        n, unit = int(m.group(1)), m.group(2)
+        n, unit = int(m.group(1) or 1), m.group(2)
         delta = {"minute": datetime.timedelta(minutes=n), "hour": datetime.timedelta(hours=n),
                  "day": datetime.timedelta(days=n), "week": datetime.timedelta(weeks=n)}[unit]
         return ms(now - delta), ms(now), m.group(0)
+    morning_start, morning_end = day + datetime.timedelta(hours=5), day + datetime.timedelta(hours=12)
+    tonight_start = day + datetime.timedelta(hours=18)
     fixed = [
-        (r"\blast night\b", day - datetime.timedelta(hours=6), day + datetime.timedelta(hours=6)),
-        (r"\bthis morning\b", day + datetime.timedelta(hours=5), day + datetime.timedelta(hours=12)),
-        (r"\btonight\b", day + datetime.timedelta(hours=18), now),
+        (r"\blast night\b", day - datetime.timedelta(hours=6),
+         min(now, day + datetime.timedelta(hours=6))),
+        (r"\bthis morning\b", morning_start,
+         now if morning_start <= now <= morning_end else morning_end),
+        (r"\btonight\b", tonight_start, now if now >= tonight_start else day + datetime.timedelta(days=1)),
         (r"\byesterday\b", day - datetime.timedelta(days=1), day),
         (r"\btoday\b", day, now),
         (r"\bthis week\b", day - datetime.timedelta(days=day.weekday()), now),
+        (r"\blast week\b", day - datetime.timedelta(days=day.weekday() + 7),
+         day - datetime.timedelta(days=day.weekday())),
     ]
     for pattern, start, end in fixed:
         m = re.search(pattern, text)
@@ -223,8 +229,13 @@ def parse(query, now=None):
     key_tags, seen = [], set()
     for size in (3, 2, 1):  # longest vocabulary phrase first ("police car" over "car")
         for i in range(len(words) - size + 1):
-            gram = " ".join(words[i:i + size])
-            tag = _canonical(gram, vocab) if size == 1 else gram
+            if size == 1:
+                gram, tag = words[i], _canonical(words[i], vocab)
+            else:
+                # "police cars" must canonicalise its last word before the phrase lookup.
+                last = _canonical(words[i + size - 1], vocab)
+                gram = " ".join(words[i:i + size - 1] + [last])
+                tag = gram
             if gram in seen or (size == 1 and gram in STOP) or tag not in vocab:
                 continue
             if any(f" {gram} " in f" {s} " for s in seen):  # inside a longer match
@@ -232,7 +243,7 @@ def parse(query, now=None):
             seen.add(gram)
             key_tags.append({"matchedWord": gram, "tags": [tag]})
     object_types = [t for t in OBJECT_WORDS if any(_object_type(w) == t for w in words)]
-    bare = retrieval.strip()
+    bare = " ".join(words)
     exact = (len(words) == 1 and _object_type(bare) is not None
              and _canonical(bare, vocab) in vocab)
     for w in words:
@@ -259,7 +270,9 @@ def parse(query, now=None):
     if start is not None:
         reply.update(startTime=start, endTime=end, timeTag=phrase)
     if not key_tags:
-        reply["exact_match"] = start is not None  # a pure time query lists everything in it
+        # Exact mode searches by object label and returns nothing without one, so a pure
+        # time query must use vector/hybrid search.
+        reply["exact_match"] = False
         log.info("NL_PARSE %r: no RAM tags -- fine for search, but an alarm rule with this "
                  "sentence stores ramTagIds=[] and can never fire", query)
     elif len(key_tags) == 1:

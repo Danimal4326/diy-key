@@ -10,7 +10,8 @@ import cv2
 import numpy as np
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-for p in (_ROOT, os.path.join(_ROOT, "stage3_wss")):
+_HERE = os.path.dirname(os.path.abspath(__file__))
+for p in (_ROOT, os.path.join(_ROOT, "stage3_wss"), _HERE):
     if p not in sys.path:
         sys.path.insert(0, p)
 
