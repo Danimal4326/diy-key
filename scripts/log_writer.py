@@ -52,6 +52,10 @@ class RotatingLog:
             self.f.close()
             rotate(self.path, self.keep)
             self.f = open(self.path, "ab")
+            try:
+                os.chmod(self.path, 0o600)
+            except OSError:
+                pass
             self.size = 0
 
     def close(self):

@@ -45,8 +45,13 @@ def ensure_cert(state_dir=None):
     the client identity for ucp4."""
     paths = config.state_paths(state_dir)
     cert, key = paths["cert"], paths["key"]
-    if os.path.exists(cert) and os.path.exists(key):
+    cert_exists, key_exists = os.path.exists(cert), os.path.exists(key)
+    if cert_exists and key_exists:
         return cert, key
+    if cert_exists != key_exists:
+        # Regenerating here would rotate the pinned identity behind the console's back.
+        raise RuntimeError(f"TLS cert/key mismatch ({cert} exists={cert_exists}, "
+                           f"{key} exists={key_exists}); clear both sides together")
     log.info("generating self-signed EC P-256 device cert (controller does not validate it)")
     subprocess.run([
         "openssl", "ecparam", "-out", key, "-name", "prime256v1", "-genkey", "-noout",

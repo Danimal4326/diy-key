@@ -59,8 +59,11 @@ def _load_registry():
     try:
         with open(REGISTRY_PATH) as f:
             return json.load(f)
-    except (OSError, json.JSONDecodeError):
+    except FileNotFoundError:
         return {}
+    except (OSError, json.JSONDecodeError) as e:
+        # Returning {} here would make create overwrite every existing instance.
+        raise RuntimeError(f"instance registry {REGISTRY_PATH} is unreadable: {e}") from e
 
 
 def _save_registry(reg):

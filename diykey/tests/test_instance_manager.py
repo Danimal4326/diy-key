@@ -130,10 +130,11 @@ class TestRegistry(unittest.TestCase):
     def test_missing_registry_is_empty(self):
         self.assertEqual(instance_manager._load_registry(), {})
 
-    def test_corrupt_registry_is_empty(self):
+    def test_corrupt_registry_fails_loudly(self):
         with open(instance_manager.REGISTRY_PATH, "w") as f:
             f.write("{oops")
-        self.assertEqual(instance_manager._load_registry(), {})
+        with self.assertRaises(RuntimeError):
+            instance_manager._load_registry()
 
 
 class TestGuards(unittest.TestCase):
