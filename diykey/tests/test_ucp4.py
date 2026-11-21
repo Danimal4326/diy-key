@@ -992,6 +992,11 @@ class TestWarmModels(unittest.TestCase):
         self.assertEqual(self._run(self.ALL),
                          ["clip", "labels", "vlm", "reid", "face", "enhance", "lpr", "ram"])
 
+    def test_face_lpr_warm_without_env(self):
+        order = self._run({})
+        for name in ("face", "enhance", "lpr"):
+            self.assertIn(name, order)
+
     def test_disabled_models_are_skipped(self):
         env = {k: "0" for k in self.ALL}
         self.assertEqual(self._run(env, on=False), ["ram"])
@@ -1062,6 +1067,12 @@ class TestRecognizeFaceLpr(_RecognizeTest):
         self.face.assert_not_called()
         self.lpr.assert_not_called()
         self.assertNotIn(self.START + 2500, self.extracted[0][1])
+
+    def test_on_without_env(self):
+        # Face/LPR default on, matching getInfo.featureFlags; env is an explicit off switch.
+        self._run(self._body(**self._metas()), {}, self.BOTH)
+        self.face.assert_called_once()
+        self.lpr.assert_called_once()
 
     def test_off_without_env(self):
         self._run(self._body(**self._metas()), {"DIYKEY_FACE": "0", "DIYKEY_LPR": ""}, self.BOTH)
@@ -1461,6 +1472,11 @@ class TestEnhanceImage(_StateDirTest):
         self.assertEqual(files["smartDetectObject"], (None, "obj1", "text/plain"))
         self.assertEqual(post.call_args.kwargs["headers"]["x-ident"], "FCECDAAABBCC")
         self.assertEqual(os.listdir(os.path.join(self.d, "clips", "enhance")), [])
+
+    def test_enhanced_without_env(self):
+        post = self._run({})
+        self.enhance.assert_called_once_with(b"orig")
+        self.assertEqual(post.call_args.kwargs["files"]["file"][1], b"new")
 
     def test_original_when_enhance_off(self):
         post = self._run({"DIYKEY_FACE_ENHANCE": "0"})

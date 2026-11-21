@@ -1120,12 +1120,12 @@ def _warm_models():
         _warm_one("VLM", lambda: vlm_describe.describe(blank))
     if reid_model.enabled():
         _warm_one("re-ID", lambda: reid_model.embed(blank))
-    if _truthy(os.environ.get("DIYKEY_FACE")):
+    if _enabled(os.environ, "DIYKEY_FACE"):
         _warm_one("face", lambda: (face_recog._models.infer_fn() or (lambda _: None))(blank))
-    if _truthy(os.environ.get("DIYKEY_FACE_ENHANCE")):
+    if _enabled(os.environ, "DIYKEY_FACE_ENHANCE"):
         _warm_one("face enhance",
                   lambda: face_enhance.enhance(cv2.imencode(".jpg", blank)[1].tobytes()))
-    if _truthy(os.environ.get("DIYKEY_LPR")) and lpr.lpr_available():
+    if _enabled(os.environ, "DIYKEY_LPR") and lpr.lpr_available():
         _warm_one("LPR", lambda: lpr._alpr_reader(blank))
     _warm_ram_plus()
 
@@ -1390,11 +1390,12 @@ def _run_summary(console_host, mac_nosep, body, frames, scene):
 def _wanted_metas(body):
     """{"face": personMeta, "lpr": vehicleMeta} for the features this task should run.
 
-    Each needs the DIYKEY_* key (what we advertise) and Protect's AI setting: the firmware
-    deletes personMeta unless enableFaceRecognize (or pose) is on and vehicleMeta unless
-    enableLprRecognize is (aikey-fw 2.2.8 syswrapper.sh:2456-2482), and Protect only adds them
-    for cameras with the feature enabled on this processor (M/851272:421-425). faceMeta
-    (Protect's own face boxes) is passed separately as face_meta (see _handle_recognize)."""
+    Each is on by default, matching getInfo.featureFlags; its DIYKEY_* key is an explicit
+    off switch. Protect's AI setting is the second gate: the firmware deletes personMeta
+    unless enableFaceRecognize (or pose) is on and vehicleMeta unless enableLprRecognize is
+    (aikey-fw 2.2.8 syswrapper.sh:2456-2482), and Protect only adds them for cameras with
+    the feature enabled on this processor (M/851272:421-425). faceMeta (Protect's own face
+    boxes) is passed separately as face_meta (see _handle_recognize)."""
     metas = {}
     derived = _roi_derived_metas(body)
     # Live 2026-11-07, Protect 7.3.74: Settings > Intelligence > "Legacy Camera Enhancement"
@@ -1406,14 +1407,14 @@ def _wanted_metas(body):
     # recognition, so the per-processor flags are not consulted there. Other ramTypes keep
     # the 7.3.70 gates (explicit metas + enable flags).
     legacy = body.get("ramType") == "videoWithRecognition"
-    if _truthy(os.environ.get("DIYKEY_FACE")) and (
+    if _enabled(os.environ, "DIYKEY_FACE") and (
             legacy or ai_setting_enabled("enableFaceRecognize")):
         person = _flatten_meta(body.get("personMeta"))
         if not person and "person" in derived:
             person = derived["person"]
         if person:
             metas["face"] = person
-    if _truthy(os.environ.get("DIYKEY_LPR")) and (
+    if _enabled(os.environ, "DIYKEY_LPR") and (
             legacy or ai_setting_enabled("enableLprRecognize")):
         vehicle = _flatten_meta(body.get("vehicleMeta"))
         if not vehicle and "vehicle" in derived:
@@ -1672,7 +1673,7 @@ def _fetch_and_enhance(console_host, mac_nosep, req_url, name):
             os.remove(path)
         except OSError:
             pass
-    jpeg = face_enhance.enhance(original) if _truthy(os.environ.get("DIYKEY_FACE_ENHANCE")) \
+    jpeg = face_enhance.enhance(original) if _enabled(os.environ, "DIYKEY_FACE_ENHANCE") \
         else original
     return original, jpeg
 
