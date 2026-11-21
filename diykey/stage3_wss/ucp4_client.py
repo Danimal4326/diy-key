@@ -43,7 +43,7 @@ if _PROJECT_DIR not in sys.path:
     sys.path.insert(0, _PROJECT_DIR)
 
 from core import config  # noqa: E402
-from system_stats import collect_system_metrics  # noqa: E402
+from system_stats import collect_system_metrics, start_system_metrics_sampler  # noqa: E402
 import clip_fetch  # noqa: E402
 import firmware  # noqa: E402
 import ram_tagger  # noqa: E402
@@ -714,16 +714,21 @@ def handle_action(head, body, device_info):
         # 128 makes it the UP-AI-KEY-128 variant, anything else the 256 GB OrinNX256.
         return {"storageSize": "256"}
     if action == "systemMetrics":
-        # CONFIRMED schema: a flat top-level array of {name, value} numbers. Values are
-        # FRACTIONS 0-1 like the firmware's (aikey-fw 2.2.8 uaibd/hwmon/jtop_systemMetrics.py:
-        # cpu user/100, gpu load/100, RAM used/tot, rounded to 4 places) and no NPU entry
-        # (the real key reports CPU, GPU, Memory only). Protect stores the numbers untouched
-        # (M/606323:29-45) and its one consumer reads PsqlUsage against 0.8
-        # (M/617109:19-21), so fractions are the scale it expects; the UI never reads them.
+        # CONFIRMED from aikey-fw 2.2.8: `ui-websocketd` serves the object written by
+        # uaibd/hwmon/aikey_monitor.py, a flat {name,value} array whose CPU/GPU/Memory are
+        # fractions 0-1 (the monitor averages 1 s samples over 30 s, then 300 s, and divides
+        # the percentage by 100). Protect's UsageChart plots 100*value on a 0-100 axis
+        # (unifi-protect-ui-internal vantage.js, `y:100*e.value`), so raw percentages pin the
+        # graph at the top. Keep the reply fractions and do not add an NPU entry: CPU, GPU
+        # and Memory are the graph series, while the firmware's PsqlUsage/curTops entries are
+        # not implemented here. system_stats holds the cached block average.
         raw = collect_system_metrics()
-        ram_total = raw["ram"]["totalKilobytes"]
-        ram_avail = raw["ram"]["availableKilobytes"]
-        ram_used = ((ram_total - ram_avail) / ram_total) if ram_total else 0.0
+        ram_total = raw["ram"].get("totalKilobytes")
+        ram_avail = raw["ram"].get("availableKilobytes")
+        ram_used = raw["ram"].get("usedFraction")
+        if ram_used is None:
+            ram_used = ((ram_total - ram_avail) / ram_total
+                        if ram_total and ram_avail is not None else 0.0)
         metrics = [
             {"name": "CPU", "value": round((raw["cpu"]["load"] or 0.0) / 100, 4)},
             {"name": "GPU", "value": round((raw["gpu"]["load"] or 0.0) / 100, 4)},
@@ -2421,6 +2426,9 @@ def main():
         log.warning("AI Key Advanced alarms (natural-language Alarm Manager rules) won't fire "
                     "reliably -- missing: %s", ", ".join(missing))
     threading.Thread(target=_warm_models, daemon=True, name="diykey-warm").start()
+    # Keep the 1 s samples running from process start so Protect's 5-minute poll always
+    # gets a block average instead of a value sampled inside the RPC.
+    start_system_metrics_sampler()
     if os.environ.get("DIYKEY_NL_SEARCH", "1") != "0":
         threading.Thread(target=_nl_search_loop, args=(args.fallback_host_port, device_info),
                          daemon=True).start()

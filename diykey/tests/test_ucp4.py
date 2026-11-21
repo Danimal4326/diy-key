@@ -304,12 +304,21 @@ class TestHandleAction(_StateDirTest):
             "ai-summary": 12.5, "lpr-legacy": 1.2})
 
     def test_system_metrics_are_fractions(self):
-        # Firmware jtop_systemMetrics.py sends load/100; Protect compares PsqlUsage to 0.8.
+        # aikey_monitor.py averages 1 s samples and sends avg/100 (CPU/GPU) and used/tot.
         raw = {"cpu": {"load": 25.0}, "gpu": {"load": None}, "npu": {"load": 90.0},
                "ram": {"totalKilobytes": 1000, "availableKilobytes": 250}}
         with mock.patch.object(ucp4_client, "collect_system_metrics", return_value=raw):
             metrics = {m["name"]: m["value"] for m in self._call("systemMetrics")["systemMetrics"]}
         self.assertEqual(metrics, {"CPU": 0.25, "GPU": 0.0, "Memory": 0.75})
+
+    def test_system_metrics_prefers_averaged_memory(self):
+        raw = {"cpu": {"load": 25.0}, "gpu": {"load": 0.0},
+               "ram": {"totalKilobytes": 1000, "availableKilobytes": 100,
+                       "usedFraction": 0.5}}
+        with mock.patch.object(ucp4_client, "collect_system_metrics", return_value=raw):
+            metrics = {m["name"]: m["value"] for m in self._call("systemMetrics")["systemMetrics"]}
+        # total-available would be 0.9; the sampler's block average must win.
+        self.assertEqual(metrics, {"CPU": 0.25, "GPU": 0.0, "Memory": 0.5})
 
     def test_ack_only_actions_reply_empty_and_log_once(self):
         ucp4_client._ack_only_logged.discard("sshService")
