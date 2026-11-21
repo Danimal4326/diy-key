@@ -91,42 +91,46 @@ def _feature(enabled):
     return {"enabled": bool(enabled), "version": "v1"}
 
 
+def _enabled(env, key):
+    """Capability switch: on unless the env var explicitly says otherwise.
+
+    A real AI Key advertises its whole AI feature set and lets Protect's enable* settings
+    decide what is dispatched. Missing models fail the individual task, not the device, so
+    the default matches the hardware; set the key to 0/off to hide a capability instead.
+    """
+    value = env.get(key)
+    return value is None or value.strip().lower() not in _OFF_VALUES
+
+
 def _deep_flags(env, vlm):
     on = vlm and _truthy(env.get("DIYKEY_DEEP_MODE"))
     return {"supportDeepMode": on, "supportVlm": on}
 
 
 def _feature_flags(env=None):
-    """featureFlags for getInfo (aiMode added by the caller). Every capability defaults to
-    off unless its DIYKEY_* key enables it."""
+    """featureFlags for getInfo (aiMode added by the caller). Capabilities default to on;
+    each DIYKEY_* key below is an explicit off switch."""
     env = os.environ if env is None else env
-    # A real key advertises its whole AI feature set and lets Protect's enable* settings
-    # decide what is dispatched. The default here is honest about missing models; set
-    # DIYKEY_ADVERTISE_ALL=1 on a build that actually carries face/LPR/VLM models to match it.
-    advertise = _truthy(env.get("DIYKEY_ADVERTISE_ALL"))
-    ram = bool((env.get("DIYKEY_RAM_MODEL") or "").strip())
-    # Only the backends vlm_describe implements; any other value would advertise a summary
-    # that never arrives.
+    ram = _enabled(env, "DIYKEY_RAM_MODEL")
+    # Only the backends vlm_describe implements can answer a summary. With DIYKEY_VLM
+    # unset we still advertise it, like the firmware; setting it to an unsupported backend
+    # is an explicit override and hides the flag.
     vlm = (env.get("DIYKEY_VLM") or "").strip().lower() in ("mlx", "transformers")
     return {
-        # Unchanged from the always-on list this replaced.
         "supportPoseEstimation": _feature(True),
         # Gates the Person class in Second Stage Verification: Protect builds the NVR's in-memory
         # aiFeatureFlag.supportPersonReId from adopted AI Keys' getInfo (live 2026-10-29 on
         # Mac B: Person unselectable until advertised, then a browser reload). Live 2026-11-07
         # (Protect 7.3.74): turning it off hid Person again. No ReID model is needed for SSV
         # itself; DIYKEY_PERSON_REID=0 turns it off.
-        "supportPersonReId": _feature((env.get("DIYKEY_PERSON_REID") or "1").strip().lower()
-                                      not in _OFF_VALUES),
-        "supportFaceEnhancement": _feature(advertise
-                                           or _truthy(env.get("DIYKEY_FACE_ENHANCE"))),
-        "supportRetroactiveProcessing": _feature(advertise or ram),
-        "supportImageSearch": _feature(advertise or _truthy(env.get("DIYKEY_CLIP"))),
-        "supportRecognizeAnything": _feature(advertise or ram),
-        "supportFaceRecognition": _feature(advertise or _truthy(env.get("DIYKEY_FACE"))),
-        "supportLicensePlateRecognition": _feature(advertise
-                                                   or _truthy(env.get("DIYKEY_LPR"))),
-        "supportAiSummary": _feature(advertise or vlm),
+        "supportPersonReId": _feature(_enabled(env, "DIYKEY_PERSON_REID")),
+        "supportFaceEnhancement": _feature(_enabled(env, "DIYKEY_FACE_ENHANCE")),
+        "supportRetroactiveProcessing": _feature(ram),
+        "supportImageSearch": _feature(_enabled(env, "DIYKEY_CLIP")),
+        "supportRecognizeAnything": _feature(ram),
+        "supportFaceRecognition": _feature(_enabled(env, "DIYKEY_FACE")),
+        "supportLicensePlateRecognition": _feature(_enabled(env, "DIYKEY_LPR")),
+        "supportAiSummary": _feature("DIYKEY_VLM" not in env or vlm),
         # Deep Understanding (Protect M/59223:106-117, M/643837:69-72: plain booleans, absent
         # reads false; supportVlm is the legacy alias, kept in sync). isDeepModeCapable
         # (M/387031:24) is what lets Protect send modelMode "deep" and, once the NVR's deepUnderstandingSettings
@@ -139,7 +143,7 @@ def _feature_flags(env=None):
         # clip) runs second_verifier, which needs the detector DIYKEY_RAM_MODEL loads. The
         # firmware advertises it (aikey-fw 2.2.8 ai-key-base-file featureflags.json); Protect
         # 7.3.70 has no such attribute (M/59223) so this only matters on a newer Protect.
-        "supportReverification": _feature(advertise or ram),
+        "supportReverification": _feature(ram),
         # The firmware's own description: "AI Key presents its TLS client certificate on
         # outbound Protect internal aiprocessors API requests". Protect only uses it to refuse
         # an internal request that presents no matching certificate (M/761379:83-104), while

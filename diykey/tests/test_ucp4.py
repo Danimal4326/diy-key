@@ -141,45 +141,38 @@ class TestHandleAction(_StateDirTest):
         with mock.patch.dict(os.environ, {**clean, **env}, clear=True):
             return self._call("getInfo")["featureFlags"]
 
-    def test_get_info_feature_flags_default_off(self):
-        # Absent flags read as enabled in Protect (M/643837:52-67): every one must be sent.
+    def test_get_info_feature_flags_default_on(self):
+        # A real key advertises its whole set; missing models fail tasks, so every capability
+        # is on unless the operator turns it off.
         flags = self._flags()
-        off = {"enabled": False, "version": "v1"}
         for name in ("supportFaceEnhancement", "supportRetroactiveProcessing",
                      "supportImageSearch", "supportRecognizeAnything", "supportFaceRecognition",
-                     "supportLicensePlateRecognition", "supportAiSummary"):
-            self.assertEqual(flags[name], off, name)
-        self.assertEqual(flags["supportPoseEstimation"], {"enabled": True, "version": "v1"})
-        # On by default: it gates Person in Second Stage Verification.
-        self.assertEqual(flags["supportPersonReId"], {"enabled": True, "version": "v1"})
+                     "supportLicensePlateRecognition", "supportAiSummary",
+                     "supportReverification", "supportPoseEstimation", "supportPersonReId"):
+            self.assertEqual(flags[name], {"enabled": True, "version": "v1"}, name)
+        self.assertFalse(flags["supportLocate"])
         self.assertEqual(flags["aiMode"], "basic")
 
-    def test_get_info_feature_flags_from_env(self):
+    def test_get_info_feature_flags_env_override(self):
+        flags = self._flags(DIYKEY_FACE="0", DIYKEY_LPR="off", DIYKEY_FACE_ENHANCE="false",
+                            DIYKEY_CLIP="no", DIYKEY_VLM="0", DIYKEY_RAM_MODEL="",
+                            DIYKEY_PERSON_REID="0")
+        for name in ("supportFaceEnhancement", "supportRetroactiveProcessing",
+                     "supportImageSearch", "supportRecognizeAnything", "supportFaceRecognition",
+                     "supportLicensePlateRecognition", "supportAiSummary",
+                     "supportReverification", "supportPersonReId"):
+            self.assertFalse(flags[name]["enabled"], name)
+        # An explicit truthy value (or a configured model) keeps it on.
         flags = self._flags(DIYKEY_FACE="1", DIYKEY_LPR="true", DIYKEY_FACE_ENHANCE="yes",
                             DIYKEY_VLM="mlx", DIYKEY_CLIP="1", DIYKEY_RAM_MODEL="/m.onnx")
         for name in ("supportFaceEnhancement", "supportRetroactiveProcessing",
                      "supportImageSearch", "supportRecognizeAnything", "supportFaceRecognition",
                      "supportLicensePlateRecognition", "supportAiSummary"):
             self.assertTrue(flags[name]["enabled"], name)
-        self.assertFalse(self._flags(DIYKEY_PERSON_REID="0")["supportPersonReId"]["enabled"])
 
-    def test_advertise_all_matches_the_firmware_set(self):
-        flags = self._flags(DIYKEY_ADVERTISE_ALL="1")
-        for name in ("supportFaceEnhancement", "supportRetroactiveProcessing",
-                     "supportImageSearch", "supportRecognizeAnything",
-                     "supportFaceRecognition", "supportLicensePlateRecognition",
-                     "supportAiSummary", "supportReverification"):
-            self.assertTrue(flags[name]["enabled"], name)
-        self.assertFalse(flags["supportLocate"])
-
-    def test_feature_flags_falsy_values(self):
-        flags = self._flags(DIYKEY_FACE="0", DIYKEY_LPR="", DIYKEY_VLM="off", DIYKEY_RAM_MODEL="")
-        for name in ("supportFaceRecognition", "supportLicensePlateRecognition",
-                     "supportAiSummary", "supportRecognizeAnything",
-                     "supportRetroactiveProcessing"):
-            self.assertFalse(flags[name]["enabled"], name)
-        self.assertFalse(self._flags(DIYKEY_VLM="0")["supportAiSummary"]["enabled"])
+    def test_feature_flags_unsupported_vlm_hides_summary(self):
         self.assertFalse(self._flags(DIYKEY_VLM="qwen2-vl")["supportAiSummary"]["enabled"])
+        self.assertTrue(self._flags()["supportAiSummary"]["enabled"])
 
     def test_model_mode_reported_in_get_info(self):
         self.addCleanup(setattr, ucp4_client, "_ai_mode", "basic")
@@ -378,8 +371,9 @@ class TestHandleAction(_StateDirTest):
         self.assertEqual(body, {})
 
     def test_feature_flags_reverification_follows_ram_model(self):
-        self.assertFalse(self._flags()["supportReverification"]["enabled"])
+        self.assertTrue(self._flags()["supportReverification"]["enabled"])
         self.assertTrue(self._flags(DIYKEY_RAM_MODEL="/m.onnx")["supportReverification"]["enabled"])
+        self.assertFalse(self._flags(DIYKEY_RAM_MODEL="")["supportReverification"]["enabled"])
 
     def test_feature_flags_mtls_and_locate(self):
         flags = self._flags()
