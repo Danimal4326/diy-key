@@ -129,7 +129,7 @@ adoption; the token is single-use.
   in `systemMetrics`.
 - Task plumbing for RAM/reverification results, multipart `ram` upload and the
   console's `/internal/aiprocessors/*` callbacks.
-- Shared config/state layer, per-instance systemd units, and 481 unit tests.
+- Shared config/state layer, per-instance systemd units, and 482 unit tests.
 - Wired AI work in `stage3_wss/`: SFace face recognition, fast-alpr plates, GFPGAN
   enhancement, VLM summaries, OSNet re-ID and per-camera scene memory.
 - Face detection (`RetinaFace_mobile320`) and embedding (`w600k_mbf`) running on
@@ -194,7 +194,7 @@ console pins the fingerprint.
 No hardware needed:
 
 ```bash
-cd diykey && python3 -m unittest discover -s tests -v   # 481 tests
+cd diykey && python3 -m unittest discover -s tests -v   # 482 tests
 ```
 
 Verified live on an Orange Pi 5 Plus against a real UNVR (2026-09-07): discovery,

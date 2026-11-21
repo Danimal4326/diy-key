@@ -222,10 +222,24 @@ class TestHandleAction(_StateDirTest):
         # Under the root daemon psql's default role would be "root", which doesn't exist.
         run = mock.Mock(return_value=mock.Mock(returncode=0, stderr=""))
         with mock.patch.dict(os.environ, {"DIYKEY_PG_SOCKET": "/pg", "DIYKEY_PG_USER": "owner"}), \
+                mock.patch.object(ucp4_client.shutil, "which", return_value=None), \
                 mock.patch.object(ucp4_client.subprocess, "run", run):
             ucp4_client._apply_pg_password("new")
         argv = run.call_args.args[0]
         self.assertEqual(argv[argv.index("-U") + 1], "owner")
+
+    def test_pg_password_root_uses_runuser(self):
+        # As root with runuser available, peer auth runs as the PG OS user; -U is neither
+        # needed nor accepted there, so the argv must be runuser -u owner -- psql ...
+        run = mock.Mock(return_value=mock.Mock(returncode=0, stderr=""))
+        with mock.patch.dict(os.environ, {"DIYKEY_PG_SOCKET": "/pg", "DIYKEY_PG_USER": "owner"}), \
+                mock.patch.object(ucp4_client.os, "geteuid", return_value=0), \
+                mock.patch.object(ucp4_client.shutil, "which", return_value="/usr/sbin/runuser"), \
+                mock.patch.object(ucp4_client.subprocess, "run", run):
+            ucp4_client._apply_pg_password("new")
+        argv = run.call_args.args[0]
+        self.assertEqual(argv[:4], ["/usr/sbin/runuser", "-u", "owner", "--"])
+        self.assertNotIn("-U", argv)
 
     def test_pg_password_default_role_without_owner(self):
         run = mock.Mock(return_value=mock.Mock(returncode=0, stderr=""))

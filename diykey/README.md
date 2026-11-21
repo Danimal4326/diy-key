@@ -71,7 +71,7 @@ once real inference exists) not yet exercised.
   `.proto` contract. Kept running; not yet confirmed to be used by the
   live flow.
 - **`proto/`** — verbatim `.proto` files from the real `ui-uaibd` package.
-- **`tests/`** — 481 stdlib `unittest` cases covering the shared config/state layer,
+- **`tests/`** — 482 stdlib `unittest` cases covering the shared config/state layer,
   discovery TLVs, ucp4 framing/handlers, adopt persistence/certs, instance units and
   `run_all` wiring. `cd diykey && python3 -m unittest discover -s tests -v`.
 - **`stage5_faceid/`** — real face detection + embedding on the RK3588 NPU, standalone-tested
